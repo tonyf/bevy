@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 keywords = ["bevy"]
 
 [features]
-default = []
+default = ["bsn_asset"]
 
 ## Enables the reflection-driven `.bsn` scene format: parsing (`bevy_bsn`) and the dynamic
 ## `Scene` implementation built from a parsed document.
@@ -37,3 +37,8 @@ variadics_please = "2.0"
 
 [lints]
 workspace = true
+
+[[test]]
+name = "dynamic_bsn"
+path = "tests/dynamic_bsn.rs"
+required-features = ["bsn_asset"]

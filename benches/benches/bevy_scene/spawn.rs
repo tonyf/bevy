@@ -47,10 +47,10 @@ fn spawn(c: &mut Criterion) {
         );
 
         // Insert an asset that the fake loader can fake read.
-        dir.insert_asset_text(Path::new("button.bsn"), "");
+        dir.insert_asset_text(Path::new("button.fakescene"), "");
 
         let asset_server = app.world().resource::<AssetServer>().clone();
-        let handle = asset_server.load("button.bsn");
+        let handle = asset_server.load("button.fakescene");
 
         run_app_until(&mut app, || asset_server.is_loaded(&handle));
 
@@ -91,17 +91,17 @@ fn spawn(c: &mut Criterion) {
             },
         );
 
-        dir.insert_asset_text(Path::new("a.bsn"), "");
+        dir.insert_asset_text(Path::new("a.fakescene"), "");
 
         let asset_server = app.world().resource::<AssetServer>().clone();
-        let handle = asset_server.load::<ScenePatch>("a.bsn");
+        let handle = asset_server.load::<ScenePatch>("a.fakescene");
 
         run_app_until(&mut app, || asset_server.is_loaded(&handle));
 
         let world = app.world_mut();
         b.iter(|| {
             for _ in 0..100 {
-                world.spawn_scene(bsn! { :"a.bsn" }).unwrap();
+                world.spawn_scene(bsn! { :"a.fakescene" }).unwrap();
             }
         });
     });
@@ -118,17 +118,17 @@ fn spawn(c: &mut Criterion) {
             },
         );
 
-        dir.insert_asset_text(Path::new("a.bsn"), "");
+        dir.insert_asset_text(Path::new("a.fakescene"), "");
 
         let asset_server = app.world().resource::<AssetServer>().clone();
-        let handle = asset_server.load::<ScenePatch>("a.bsn");
+        let handle = asset_server.load::<ScenePatch>("a.fakescene");
 
         run_app_until(&mut app, || asset_server.is_loaded(&handle));
 
         let world = app.world_mut();
         b.iter(|| {
             for _ in 0..100 {
-                world.spawn_scene(bsn! { :"a.bsn" }).unwrap();
+                world.spawn_scene(bsn! { :"a.fakescene" }).unwrap();
             }
         });
     });
@@ -212,16 +212,16 @@ fn ui_loaded_asset() -> impl Scene {
     bsn! {
         Node
         Children [
-            (:"button.bsn" Node { width: Val::Px(200.) }),
-            (:"button.bsn" Node { width: Val::Px(200.) }),
-            (:"button.bsn" Node { width: Val::Px(200.) }),
-            (:"button.bsn" Node { width: Val::Px(200.) }),
-            (:"button.bsn" Node { width: Val::Px(200.) }),
-            (:"button.bsn" Node { width: Val::Px(200.) }),
-            (:"button.bsn" Node { width: Val::Px(200.) }),
-            (:"button.bsn" Node { width: Val::Px(200.) }),
-            (:"button.bsn" Node { width: Val::Px(200.) }),
-            (:"button.bsn" Node { width: Val::Px(200.) }),
+            (:"button.fakescene" Node { width: Val::Px(200.) }),
+            (:"button.fakescene" Node { width: Val::Px(200.) }),
+            (:"button.fakescene" Node { width: Val::Px(200.) }),
+            (:"button.fakescene" Node { width: Val::Px(200.) }),
+            (:"button.fakescene" Node { width: Val::Px(200.) }),
+            (:"button.fakescene" Node { width: Val::Px(200.) }),
+            (:"button.fakescene" Node { width: Val::Px(200.) }),
+            (:"button.fakescene" Node { width: Val::Px(200.) }),
+            (:"button.fakescene" Node { width: Val::Px(200.) }),
+            (:"button.fakescene" Node { width: Val::Px(200.) }),
         ]
     }
 }
@@ -416,6 +416,12 @@ impl AssetLoader for FakeSceneLoader {
     type Asset = ScenePatch;
     type Error = std::io::Error;
     type Settings = ();
+
+    fn extensions(&self) -> &[&str] {
+        // Distinct from `bsn`: the real `DynamicBsnLoader` would otherwise win the
+        // extension match and these benches would measure empty scenes.
+        &["fakescene"]
+    }
 
     async fn load(
         &self,

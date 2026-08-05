@@ -1,7 +1,6 @@
 //! Fixtures shared by the `dynamic` module's tests, plus the end-to-end tests that spawn a
 //! document-built scene into a real [`World`](bevy_ecs::world::World).
 
-use alloc::sync::Arc;
 use std::path::Path;
 
 use bevy_app::{App, TaskPoolPlugin};
@@ -10,8 +9,7 @@ use bevy_asset::{
         memory::{Dir, MemoryAssetReader},
         AssetSourceBuilder, AssetSourceId,
     },
-    Asset, AssetApp, AssetLoader, AssetPlugin, AssetServer, Assets, Handle, HandleTemplate,
-    ReflectHandle,
+    Asset, AssetApp, AssetPlugin, AssetServer, Assets, Handle, HandleTemplate, ReflectHandle,
 };
 use bevy_bsn::{parse, BsnDocument};
 use bevy_ecs::{
@@ -26,7 +24,7 @@ use bevy_ecs::{
     relationship::RelationshipTarget,
     template::FromTemplate,
 };
-use bevy_reflect::{std_traits::ReflectDefault, Reflect, TypePath, TypeRegistry};
+use bevy_reflect::{std_traits::ReflectDefault, Reflect, TypeRegistry};
 use core::any::TypeId;
 
 use crate::{
@@ -837,11 +835,7 @@ fn base_asset_app(base_source: &'static str) -> App {
     app.finish();
     app.cleanup();
 
-    let registry = app.world().resource::<AppTypeRegistry>().clone();
-    app.register_asset_loader(DynamicSceneLoader {
-        source: base_source,
-        registry,
-    });
+    // The real `.bsn` loader, registered by `ScenePlugin`, parses the file below.
     dir.insert_asset_text(Path::new("a.bsn"), base_source);
 
     let asset_server = app.world().resource::<AssetServer>().clone();
@@ -857,30 +851,4 @@ fn base_asset_app(base_source: &'static str) -> App {
         "the base scene asset never finished loading"
     );
     app
-}
-
-/// A minimal stand-in for the real `.bsn` asset loader, which is SPEC-5's to write.
-#[derive(TypePath)]
-struct DynamicSceneLoader {
-    source: &'static str,
-    registry: AppTypeRegistry,
-}
-
-impl AssetLoader for DynamicSceneLoader {
-    type Asset = ScenePatch;
-    type Error = std::io::Error;
-    type Settings = ();
-
-    async fn load(
-        &self,
-        _reader: &mut dyn bevy_asset::io::Reader,
-        _settings: &Self::Settings,
-        load_context: &mut bevy_asset::LoadContext<'_>,
-    ) -> Result<Self::Asset, Self::Error> {
-        let document = doc(self.source);
-        let path: Arc<str> = Arc::from(load_context.path().to_string().as_str());
-        let scene = DynamicScene::from_document(&document, path, &self.registry)
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-        Ok(ScenePatch::load_with(load_context, scene))
-    }
 }

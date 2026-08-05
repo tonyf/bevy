@@ -385,7 +385,6 @@
 //! ```
 //!
 //! Scene assets always need to be cached using the `:` prefix.
-//! Note that the `.bsn` file format is not yet released. (This already works, assuming theres a loader for the asset format)
 //! ```ignore
 //! bsn! {
 //!    :"enemy.bsn"
@@ -862,27 +861,46 @@
 //!
 //! ## .bsn Asset Format
 //!
-//! Bevy does not currently have support for `.bsn` files,
-//! but intends to offer a `.bsn` asset format in future releases.
+//! Scenes can be authored on disk as `.bsn` files and loaded like any other asset:
 //!
-//! This would allow you to define your scenes on disk,
-//! creating/modifying them in various authoring tools and using asset hot-reloading.
+//! ```ignore
+//! commands.spawn(ScenePatchInstance(asset_server.load("scenes/player.bsn")));
+//! ```
 //!
-//! This format is intended to have broad syntactic compatibility with the `bsn!` macro,
-//! making it easy to port your content between both the macro and the asset form.
+//! A `.bsn` file uses the same syntax as the [`bsn!`] macro, minus everything that requires
+//! compiling Rust: no `{ expr }` blocks, no `on(...)` observers, no `template(...)` closures,
+//! no function scene includes, and no Rust constants. What remains — components with full or
+//! registry-resolvable type paths, partial struct and tuple patches, enum variants, `#Name`,
+//! `Children [ ... ]` and other relationship targets, asset paths as `Handle` fields, and
+//! `:"other.bsn"` inheritance — behaves identically to the macro. A `.bsn` scene and a `bsn!`
+//! scene that patch the same component merge field by field, in either direction.
 //!
-//! When planning your future use of `.bsn` asset files (which are not currently shipped), be aware that
-//! unlike `bsn!` macro calls `.bsn` assets will not support expressions or other dynamic features directly.
+//! Values in a `.bsn` file are literals and struct/enum literals only. Rust constants and
+//! associated constants (`Color::WHITE`, `Val::ZERO`) are **not** supported yet — write the
+//! value out instead (`Color::Srgba(Srgba { red: 1.0, green: 1.0, blue: 1.0, alpha: 1.0 })`).
 //!
-//! For now, you should use existing non-Bevy asset formats like glTF,
-//! search for ecosystem implementations or stick to `bsn!` macro calls.
+//! Every type named in a `.bsn` file must be registered in the type registry and must derive
+//! [`Reflect`] with `#[reflect(Component)]` (plus `#[reflect(Default)]` on any type whose
+//! fields you patch). Asset paths inside a `.bsn` file are relative to the asset root, not to
+//! the file that names them. Each `.bsn` file describes exactly one root entity and cannot
+//! inherit from itself; labeled sub-assets (`file.bsn#Label`) are not supported yet.
 //!
-//! Note that the architecture to support an asset format already exists,
-//! allowing community implementations/experimentation until an official version exists. An example of how to go about this
-//! can be found in the [scene benchmarks](<https://github.com/bevyengine/bevy/blob/v0.19.0/benches/benches/bevy_scene/spawn.rs#L414>)
+//! Loading is provided by `DynamicBsnLoader`, registered by [`ScenePlugin`] when the
+//! `bsn_asset` cargo feature is enabled (it is on by default; it is included in the `scene`
+//! feature collection). Parse and resolution failures are reported as asset load errors with
+//! `file:line:column` locations and never panic; a failed scene asset is also logged once by
+//! `report_scene_patch_load_failures`, naming the entities that will never spawn as a result.
+//!
+//! The `.bsn` grammar itself — lexer, parser, AST, and printer — lives in the standalone
+//! `bevy_bsn` crate, which depends on no other Bevy crate and builds on `no_std`. Third-party
+//! tooling (asset pipelines, editor plugins, exporters from other DCC tools) can read and write
+//! `.bsn` files by depending on `bevy_bsn` alone, without pulling in the engine.
+//!
+//! See the `dynamic_bsn` example for a complete walkthrough.
 //!
 //! [`Template`]: bevy_ecs::template::Template
 //! [`FromTemplate`]: bevy_ecs::template::FromTemplate
+//! [`Reflect`]: bevy_reflect::Reflect
 //! [`Asset`]: bevy_asset::Asset
 //! [`Entity`]: bevy_ecs::entity::Entity
 //! [`EntityTemplate`]: bevy_ecs::template::EntityTemplate
@@ -898,6 +916,8 @@
 ///
 /// This includes the most common types in this crate, re-exported for your convenience.
 pub mod prelude {
+    #[cfg(feature = "bsn_asset")]
+    pub use crate::DynamicBsnLoader;
     pub use crate::{
         bsn, bsn_list, on, template_value, CommandsSceneExt, EntityCommandsSceneExt,
         EntityWorldMutSceneExt, PatchFromTemplate, PatchTemplate, Scene, SceneComponent, SceneList,
@@ -941,6 +961,10 @@ pub use bevy_scene_macros::bsn_list;
 pub use bevy_scene_macros::SceneComponent;
 
 /// Adds support for spawning Bevy Scenes. See [`Scene`], [`SceneList`], [`ScenePatch`], and the [`bsn!`] macro for more information.
+///
+/// Requires [`AssetPlugin`](bevy_asset::AssetPlugin) to be added first. When the `bsn_asset`
+/// feature is enabled (it is by default), this plugin also registers `DynamicBsnLoader` and so
+/// additionally requires the `AppTypeRegistry` resource, which is present in every `App::new()`.
 #[derive(Default)]
 pub struct ScenePlugin;
 
@@ -969,6 +993,14 @@ impl Plugin for ScenePlugin {
             registry
                 .register_type_conversion::<String, bevy_ecs::name::HashedStr, _>(|s| Ok(s.into()));
         }
+
+        #[cfg(feature = "bsn_asset")]
+        app.init_asset_loader::<DynamicBsnLoader>().add_systems(
+            SpawnScene,
+            report_scene_patch_load_failures
+                .in_set(SceneSpawnerSystems::SceneSpawn)
+                .before(resolve_scene_patches),
+        );
     }
 }
 
@@ -1106,7 +1138,7 @@ mod tests {
 
         fn b() -> impl Scene {
             bsn! {
-                :"a.bsn"
+                :"a.fakescene"
                 Position { x: 1. }
                 Children [ #Y ]
             }
@@ -1120,7 +1152,7 @@ mod tests {
         }
 
         #[derive(SceneComponent, Default, Clone)]
-        #[scene("a.bsn")]
+        #[scene("a.fakescene")]
         struct AWidget {
             value: usize,
         }
@@ -1163,12 +1195,18 @@ mod tests {
             ) -> Result<Self::Asset, Self::Error> {
                 Ok(ScenePatch::load_with(load_context, a()))
             }
+
+            // A dedicated extension, so that this loader is picked rather than the real
+            // `DynamicBsnLoader` that `ScenePlugin` registers for `.bsn`.
+            fn extensions(&self) -> &[&str] {
+                &["fakescene"]
+            }
         }
 
         // Insert an asset that the fake loader can fake read.
-        dir.insert_asset_text(Path::new("a.bsn"), "");
+        dir.insert_asset_text(Path::new("a.fakescene"), "");
         let asset_server = app.world().resource::<AssetServer>().clone();
-        let handle = asset_server.load("a.bsn");
+        let handle = asset_server.load("a.fakescene");
         assert!(app.world().get_resource::<Assets<ScenePatch>>().is_some());
         run_app_until(&mut app, || asset_server.is_loaded(&handle));
         let patch = app
@@ -1198,7 +1236,7 @@ mod tests {
         let name = y.get::<Name>().unwrap();
         assert_eq!(name.as_str(), "Y");
 
-        // "a.bsn" as AWidget's "component scene"
+        // "a.fakescene" as AWidget's "component scene"
         let id = world
             .spawn_scene(bsn! {@AWidget { value: 2 }})
             .unwrap()
@@ -3171,6 +3209,12 @@ mod tests {
                 ) -> Result<Self::Asset, Self::Error> {
                     Ok(ScenePatch::load_with(load_context, base()))
                 }
+
+                // A dedicated extension, so that this loader is picked rather than the real
+                // `DynamicBsnLoader` that `ScenePlugin` registers for `.bsn`.
+                fn extensions(&self) -> &[&str] {
+                    &["fakescene"]
+                }
             }
 
             let mut app = App::new();
@@ -3193,16 +3237,16 @@ mod tests {
             app.cleanup();
             app.register_asset_loader(FakeSceneLoader);
 
-            dir.insert_asset_text(Path::new("dynamic_base.bsn"), "");
+            dir.insert_asset_text(Path::new("dynamic_base.fakescene"), "");
             let asset_server = app.world().resource::<AssetServer>().clone();
-            let handle: Handle<ScenePatch> = asset_server.load("dynamic_base.bsn");
+            let handle: Handle<ScenePatch> = asset_server.load("dynamic_base.fakescene");
             run_app_until(&mut app, || asset_server.is_loaded(&handle));
 
             FAKE_APPLY_COUNT.store(0, Ordering::Relaxed);
             let id = app
                 .world_mut()
                 .spawn_scene((
-                    bsn! { :"dynamic_base.bsn" },
+                    bsn! { :"dynamic_base.fakescene" },
                     SceneFunction(|context: &mut ResolveContext, scene: &mut ResolvedScene| {
                         // Triggers the copy-on-write clone of the cached dynamic template, which
                         // records it in `duplicate_templates`.
