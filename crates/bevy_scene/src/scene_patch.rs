@@ -115,8 +115,49 @@ pub enum SpawnSceneError {
 }
 
 /// A component that, when added, will queue applying the given [`ScenePatch`] after the scene and its dependencies have been loaded and resolved.
+///
+/// If the [`ScenePatch`] is loaded from a file and that file changes on disk (asset watching must
+/// be enabled — see [`AssetPlugin::watch_for_changes_override`]), the scene is re-resolved and
+/// re-applied to this entity. See [`SceneInstanceState`] for what that costs.
+///
+/// [`AssetPlugin::watch_for_changes_override`]: bevy_asset::AssetPlugin::watch_for_changes_override
 #[derive(Component, FromTemplate, Deref, DerefMut)]
+#[require(SceneInstanceState)]
 pub struct ScenePatchInstance(pub Handle<ScenePatch>);
+
+/// Records what the most recent application of a [`ScenePatch`] created on this entity, so that
+/// the scene can be re-applied when its source asset changes (hot reload).
+///
+/// This is added automatically alongside [`ScenePatchInstance`] (via `#[require]`, so it lands in
+/// the same archetype move) and is maintained by the scene spawning systems. You should not add,
+/// remove or write it yourself; reading it is fine.
+///
+/// # Hot reload semantics
+///
+/// Reloading a scene is a *rebuild*, not a reconciliation. When the asset changes, every entity in
+/// [`SceneInstanceState::spawned`] is despawned — recursively, since scene children are linked
+/// spawns — and the scene is applied to this entity again. Consequently:
+///
+/// - Runtime mutations to scene-spawned entities, and any entities added under them at runtime,
+///   are lost.
+/// - [`Entity`] ids held elsewhere that point into the scene dangle after a reload.
+/// - Components that the edited scene no longer declares are **not** removed from this entity; the
+///   apply path only ever writes. Respawn the instance to pick that up.
+///
+/// The instance entity itself is never despawned, so its own id, its relationship to its parent,
+/// and any components on it that the scene does not overwrite all survive.
+#[derive(Component, Debug, Default)]
+pub struct SceneInstanceState {
+    /// `true` once this instance's [`ScenePatch`] has been applied at least once. This is what
+    /// distinguishes "waiting for the first load" from "already live, and the asset just reloaded".
+    pub applied: bool,
+    /// Every [`Entity`] spawned by the most recent application of the scene, *excluding* this
+    /// entity. Sorted and deduplicated. These are despawned before the scene is re-applied.
+    ///
+    /// See [`ResolvedSceneRoot::apply_recording`], which populates this, for the one kind of
+    /// scene-created entity that is not listed here.
+    pub spawned: Vec<Entity>,
+}
 
 /// An [`Asset`] that holds a [`SceneList`], tracks its dependencies, and holds a [`ResolvedSceneListRoot`] (after the [`SceneList`] has been loaded and resolved)
 #[derive(Asset, TypePath)]

@@ -79,13 +79,55 @@ impl ResolvedSceneRoot {
         entity: &mut EntityWorldMut,
         bundle_scratch: &mut BundleScratch,
     ) -> Result<(), ApplySceneError> {
+        self.apply_inner(entity, bundle_scratch, SpawnRecorder::None)
+    }
+
+    /// Applies this scene to `entity` exactly like [`ResolvedSceneRoot::apply`], and additionally
+    /// appends every [`Entity`] spawned during the application to `spawned`. `entity` itself is
+    /// never appended, and `spawned` is sorted and deduplicated on return.
+    ///
+    /// This is what makes hot reload able to clean up after itself: the recorded entities are the
+    /// scene's previous generation, and are despawned before the scene is re-applied. See
+    /// [`SceneInstanceState`], which stores the result.
+    ///
+    /// # Limitation
+    ///
+    /// A `#Name` reference that is only ever used as a *component value*, and never names an entity
+    /// in the scene (`Reference(#Ghost)` with no `#Ghost` entity), materializes an empty entity
+    /// through [`SceneEntityReferences::get`] that is not recorded here, because
+    /// [`SceneEntityReferences`] does not expose its entries. Every related entity — i.e. every
+    /// descendant the scene actually describes, at any depth — is recorded.
+    ///
+    /// [`SceneInstanceState`]: crate::SceneInstanceState
+    pub fn apply_recording(
+        &self,
+        entity: &mut EntityWorldMut,
+        bundle_scratch: &mut BundleScratch,
+        spawned: &mut Vec<Entity>,
+    ) -> Result<(), ApplySceneError> {
+        let root = entity.id();
+        let result = self.apply_inner(entity, bundle_scratch, SpawnRecorder::Record(spawned));
+        // A related scene whose `#Name` resolves to the root would otherwise schedule the instance
+        // entity itself for despawn on the next reload.
+        spawned.retain(|spawned| *spawned != root);
+        spawned.sort_unstable();
+        spawned.dedup();
+        result
+    }
+
+    fn apply_inner(
+        &self,
+        entity: &mut EntityWorldMut,
+        bundle_scratch: &mut BundleScratch,
+        recorder: SpawnRecorder,
+    ) -> Result<(), ApplySceneError> {
         // A *fresh* map per apply is load-bearing: see `SceneEntityReference`'s `# Invariant`
         // section. References produced from a scene asset are identical for every spawn of that
         // asset, so a shared map would alias entities across spawns.
         let mut entity_references = SceneEntityReferences::default();
         let mut context = TemplateContext::new(entity, &mut entity_references);
 
-        let result = self.scene.apply(&mut context, bundle_scratch);
+        let result = self.scene.apply(&mut context, bundle_scratch, recorder);
         if !bundle_scratch.is_empty() {
             // SAFETY: Components comes from the same world as the `context` passed in to self.scene.apply above
             unsafe {
@@ -93,6 +135,36 @@ impl ResolvedSceneRoot {
             }
         }
         result
+    }
+}
+
+/// An optional sink for the entities spawned while applying a [`ResolvedScene`].
+///
+/// The immediate spawn / apply paths pass [`SpawnRecorder::None`], which every operation compiles
+/// away to nothing, so recording costs the non-reloadable paths nothing.
+enum SpawnRecorder<'a> {
+    /// Spawned entities are not recorded.
+    None,
+    /// Every entity spawned during the apply is pushed here.
+    Record(&'a mut Vec<Entity>),
+}
+
+impl SpawnRecorder<'_> {
+    #[inline]
+    fn push(&mut self, entity: Entity) {
+        if let Self::Record(entities) = self {
+            entities.push(entity);
+        }
+    }
+
+    /// Produces a shorter-lived recorder writing to the same sink, so that a recorder can be
+    /// passed down a recursive apply.
+    #[inline]
+    fn reborrow(&mut self) -> SpawnRecorder<'_> {
+        match self {
+            Self::None => SpawnRecorder::None,
+            Self::Record(entities) => SpawnRecorder::Record(entities),
+        }
     }
 }
 
@@ -156,6 +228,9 @@ impl ResolvedSceneListRoot {
             let result = scene.apply(
                 &mut TemplateContext::new(&mut entity, &mut entity_references),
                 &mut bundle_scratch,
+                // Scene-list hot reload is out of scope: a scene list spawns N roots with no
+                // owning instance entity to key re-application off.
+                SpawnRecorder::None,
             );
             if let Err(err) = result {
                 // SAFETY: Components comes from the same world as the `context` passed in to self.scene.apply above
@@ -226,8 +301,9 @@ impl ResolvedScene {
         &self,
         context: &mut TemplateContext,
         bundle_scratch: &mut BundleScratch,
+        recorder: SpawnRecorder,
     ) -> Result<(), ApplySceneError> {
-        self.apply_with(context, bundle_scratch, |_, _| {})
+        self.apply_with(context, bundle_scratch, |_, _| {}, recorder)
     }
 
     /// Applies this scene to the given [`TemplateContext`] (which holds an already-spawned [`EntityWorldMut`]).
@@ -246,6 +322,7 @@ impl ResolvedScene {
         context: &mut TemplateContext,
         bundle_scratch: &mut BundleScratch,
         writer_ops: impl FnOnce(&mut TemplateContext, &mut BundleWriter),
+        mut recorder: SpawnRecorder,
     ) -> Result<(), ApplySceneError> {
         let mut bundle_writer = bundle_scratch.writer();
         for entity_reference in self.entity_references.iter().copied() {
@@ -303,10 +380,12 @@ impl ResolvedScene {
 
                 bundle_writer.write(context.entity);
 
-                resolved_cached
-                    .scene
-                    .apply_related(context, bundle_scratch)?;
-                self.apply_related(context, bundle_scratch)?;
+                resolved_cached.scene.apply_related(
+                    context,
+                    bundle_scratch,
+                    recorder.reborrow(),
+                )?;
+                self.apply_related(context, bundle_scratch, recorder)?;
             }
         } else {
             // SAFETY: bundle_writer was used with the same World across all cases in this function,
@@ -326,7 +405,7 @@ impl ResolvedScene {
                 }
                 (writer_ops)(context, &mut bundle_writer);
                 bundle_writer.write(context.entity);
-                self.apply_related(context, bundle_scratch)?;
+                self.apply_related(context, bundle_scratch, recorder)?;
             }
         };
 
@@ -372,6 +451,7 @@ impl ResolvedScene {
         &self,
         context: &mut TemplateContext,
         bundle_scratch: &mut BundleScratch,
+        mut recorder: SpawnRecorder,
     ) -> Result<(), ApplySceneError> {
         for related_resolved_scenes in self.related.values() {
             let target = context.entity.id();
@@ -379,6 +459,7 @@ impl ResolvedScene {
                 entity,
                 entity_references,
             } = context;
+            let recorder = &mut recorder;
             entity.world_scope(|world| -> Result<(), ApplySceneError> {
                 for (index, scene) in related_resolved_scenes.scenes.iter().enumerate() {
                     let mut entity =
@@ -388,6 +469,11 @@ impl ResolvedScene {
                         } else {
                             world.spawn_empty()
                         };
+
+                    // A related entity is scene-owned however it was obtained: either it was
+                    // spawned right here, or it was materialized earlier in this same apply by a
+                    // forward `#Name` reference.
+                    recorder.push(entity.id());
 
                     scene
                         .apply_with(
@@ -406,6 +492,7 @@ impl ResolvedScene {
                                     );
                                 }
                             },
+                            recorder.reborrow(),
                         )
                         .map_err(|e| ApplySceneError::RelatedSceneError {
                             relationship_type_name: related_resolved_scenes.relationship_name,

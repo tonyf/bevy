@@ -1,14 +1,14 @@
 use crate::{
-    ResolvedSceneRoot, Scene, SceneList, SceneListPatch, ScenePatch, ScenePatchInstance,
-    SpawnSceneError,
+    ApplySceneError, ResolvedSceneRoot, Scene, SceneInstanceState, SceneList, SceneListPatch,
+    ScenePatch, ScenePatchInstance, SpawnSceneError,
 };
 use alloc::sync::Arc;
-use bevy_asset::{AssetEvent, AssetServer, Assets, Handle};
+use bevy_asset::{AssetEvent, AssetId, AssetPath, AssetServer, Assets, Handle};
 use bevy_ecs::{
     bundle::BundleScratch, message::MessageCursor, prelude::*, reflect::AppTypeRegistry,
     relationship::Relationship,
 };
-use bevy_platform::collections::HashMap;
+use bevy_platform::collections::{HashMap, HashSet};
 use tracing::error;
 
 /// Adds scene spawning functionality to [`World`].
@@ -207,13 +207,10 @@ impl WorldSceneExt for World {
         let assets = self.resource::<AssetServer>();
         let patch = ScenePatch::load(assets, scene);
         let handle = assets.add(patch);
-        let mut entity = self.spawn_empty();
-        let id = entity.id();
-        entity
-            .resource_mut::<QueuedScenes>()
-            .new_scene_entities
-            .push((id, handle));
-        entity
+        // Inserting the component (rather than pushing to `QueuedScenes` by hand) queues the spawn
+        // through `on_add_scene_patch_instance`, which does exactly the same push — and makes the
+        // entity hot-reload-tracked, which matters for scenes that include a `.bsn` base.
+        self.spawn(ScenePatchInstance(handle))
     }
 
     fn spawn_scene_list<L: SceneList>(
@@ -543,10 +540,9 @@ impl EntityWorldMutSceneExt for EntityWorldMut<'_> {
         let assets = self.resource::<AssetServer>();
         let patch = ScenePatch::load(assets, scene);
         let handle = assets.add(patch);
-        let id = self.id();
-        self.resource_mut::<QueuedScenes>()
-            .new_scene_entities
-            .push((id, handle));
+        // See `World::queue_spawn_scene` for why this inserts a component instead of pushing to
+        // `QueuedScenes` directly.
+        self.insert(ScenePatchInstance(handle));
     }
 }
 
@@ -635,6 +631,15 @@ impl EntityCommandsSceneExt for EntityCommands<'_> {
 }
 
 /// A [`System`] that resolves [`ScenePatch`] and [`SceneListPatch`] assets whose dependencies have been fully loaded.
+///
+/// This is also the hot-reload entry point. When a `.bsn` file changes on disk, the asset server
+/// re-runs its loader and replaces the whole [`ScenePatch`] value with a fresh one — carrying a
+/// fresh [`ScenePatch::scene`] and a cleared [`ScenePatch::resolved`] — then re-fires
+/// [`AssetEvent::LoadedWithDependencies`]. So the same code path that resolves a first load
+/// re-resolves a reload, with no retained source and no extra asset state. [`AssetEvent::Modified`]
+/// is deliberately *not* used as the trigger: it reaches this schedule a frame later than
+/// `LoadedWithDependencies`, and `Assets::get_mut` emits one on every resolve, so it cannot
+/// distinguish a real edit from this system's own bookkeeping.
 pub fn resolve_scene_patches(
     mut events: MessageReader<AssetEvent<ScenePatch>>,
     mut list_events: MessageReader<AssetEvent<SceneListPatch>>,
@@ -643,6 +648,7 @@ pub fn resolve_scene_patches(
     mut list_patches: ResMut<Assets<SceneListPatch>>,
     mut waiting: ResMut<WaitingScenes>,
     type_registry: Option<Res<AppTypeRegistry>>,
+    mut resolved_once: Local<HashSet<AssetId<ScenePatch>>>,
 ) {
     // Held across every `resolve` below. `Scene::resolve` impls must not write-lock the registry.
     let type_registry_guard = type_registry.as_ref().map(|registry| registry.read());
@@ -650,17 +656,31 @@ pub fn resolve_scene_patches(
     for event in events.read() {
         match *event {
             AssetEvent::LoadedWithDependencies { id } => {
-                if let Some(scene) = patches.get_mut(id).and_then(|mut p| p.scene.take()) {
+                // `insert` returns false when the id was already present, which — since
+                // `LoadedWithDependencies` fires exactly once per (re)load of an asset — means
+                // this is a reload rather than a first load.
+                let is_reload = !resolved_once.insert(id);
+                // `get_mut_untracked` rather than `get_mut`: storing the resolved scene is
+                // bookkeeping, not a change to what the asset means, and `get_mut`'s drop guard
+                // would queue an `AssetEvent::Modified` on every single resolve.
+                if let Some(scene) = patches.get_mut_untracked(id).and_then(|p| p.scene.take()) {
                     match ResolvedSceneRoot::resolve(scene, &assets, &patches, type_registry) {
                         Ok(resolved) => {
-                            let mut patch = patches.get_mut(id).unwrap();
+                            let patch = patches.get_mut_untracked(id).unwrap();
                             patch.resolved = Some(Arc::new(resolved));
+                            if is_reload {
+                                reload_dependents(id, &assets, &patches);
+                            }
                         }
+                        // A `.bsn` file that no longer parses (or no longer resolves) leaves the
+                        // new value with `resolved: None`, and every live instance keeps rendering
+                        // the last good version.
                         Err(err) => error!("Failed to resolve scene {id}: {err}"),
                     }
                 }
             }
             AssetEvent::Removed { id } => {
+                resolved_once.remove(&id);
                 if let Some(waiting_entities) = waiting.scene_entities.remove(&id)
                     && !waiting_entities.is_empty()
                 {
@@ -705,6 +725,173 @@ pub fn resolve_scene_patches(
     }
 }
 
+/// Force-reloads every [`ScenePatch`] asset that lists `changed` as a dependency — i.e. every
+/// `.bsn` file that includes it as a cached base with `:"base.bsn"` — so that the copy-on-write
+/// template snapshots those dependents took at resolve time are rebuilt from the new content.
+///
+/// This is deliberately not left to the asset server's own hot-reload ancestor walk: a cached
+/// scene include is registered as a *runtime* dependency, not a *loader* dependency, and only
+/// loader dependencies are walked. Editing a base file therefore produces no events at all for its
+/// dependents without this.
+///
+/// Reloaded dependents re-enter the pipeline through the normal `LoadedWithDependencies` path a
+/// frame or two later, which re-applies their instances and invalidates *their* dependents in
+/// turn. The include graph is acyclic (a cycle fails at first resolve), so this terminates.
+///
+/// Dependents with no asset path — scenes built in code by `bsn!` — cannot be reloaded this way;
+/// they are handled instead by the re-apply pass, which also matches instances whose patch merely
+/// *depends on* the changed asset.
+fn reload_dependents(
+    changed: AssetId<ScenePatch>,
+    assets: &AssetServer,
+    patches: &Assets<ScenePatch>,
+) {
+    let changed_untyped = changed.untyped();
+    // PERF: this derives the reverse-dependency map on demand — one scan of `Assets<ScenePatch>`
+    // per reload event — rather than maintaining a cached index. Reloads are human-paced; a cached
+    // index is a follow-up if profiling ever demands it.
+    let dependents: Vec<AssetPath<'static>> = patches
+        .iter()
+        .filter(|(dependent_id, patch)| {
+            *dependent_id != changed
+                && patch
+                    .dependencies
+                    .iter()
+                    .any(|dependency| dependency.id() == changed_untyped)
+        })
+        // UUID-keyed assets have no path and are skipped; the re-apply pass still covers their
+        // instances.
+        .filter_map(|(dependent_id, _)| assets.get_path(dependent_id).map(AssetPath::into_owned))
+        .collect();
+
+    for path in dependents {
+        assets.reload(path);
+    }
+}
+
+/// Returns whether the [`ScenePatch`] `dependent` lists `dependency` among its dependencies.
+fn patch_depends_on(
+    patches: &Assets<ScenePatch>,
+    dependent: AssetId<ScenePatch>,
+    dependency: AssetId<ScenePatch>,
+) -> bool {
+    let dependency = dependency.untyped();
+    patches.get(dependent).is_some_and(|patch| {
+        patch
+            .dependencies
+            .iter()
+            .any(|handle| handle.id() == dependency)
+    })
+}
+
+/// Applies `resolved` to `entity`, recording the entities it spawns into the entity's
+/// [`SceneInstanceState`] and marking the instance applied.
+///
+/// Every application of a [`ScenePatch`] to an instance entity goes through here, so that a later
+/// reload always knows what to clean up. If `entity` no longer exists this is a no-op: an instance
+/// can be despawned between being queued and being applied.
+fn apply_to_instance(
+    world: &mut World,
+    entity: Entity,
+    resolved: &ResolvedSceneRoot,
+    bundle_scratch: &mut BundleScratch,
+) -> Result<(), ApplySceneError> {
+    let mut spawned = Vec::new();
+    let result = {
+        let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
+            return Ok(());
+        };
+        if let Some(mut state) = entity_mut.get_mut::<SceneInstanceState>() {
+            // Set before applying: if the apply fails half way, the instance is still "live" and
+            // whatever landed in `spawned` must still be cleaned up by the next reload.
+            state.applied = true;
+            // Reuse the previous application's allocation.
+            spawned = core::mem::take(&mut state.spawned);
+            spawned.clear();
+        }
+        resolved.apply_recording(&mut entity_mut, bundle_scratch, &mut spawned)
+    };
+
+    if let Some(mut state) = world.get_mut::<SceneInstanceState>(entity) {
+        state.spawned = spawned;
+    }
+    result
+}
+
+/// Re-applies the (re)loaded [`ScenePatch`] `id` to every already-applied instance of it, and to
+/// every already-applied instance whose own patch depends on it.
+///
+/// The previous generation of scene-spawned entities is despawned *first*. Applying a scene over
+/// the top of an earlier application does not despawn what that application created — it only
+/// unlinks it — which leaves a parentless "ghost" copy of the whole subtree behind
+/// (bevyengine/bevy#24939).
+fn reapply_instances(
+    world: &mut World,
+    id: AssetId<ScenePatch>,
+    scene_patch_instances: &mut QueryState<(Entity, &ScenePatchInstance, &SceneInstanceState)>,
+    bundle_scratch: &mut BundleScratch,
+) {
+    if world
+        .resource::<Assets<ScenePatch>>()
+        .get(id)
+        .is_none_or(|patch| patch.resolved.is_none())
+    {
+        // A reload that failed to parse or to resolve leaves `resolved` empty on the new value.
+        // Live instances keep the last good version.
+        return;
+    }
+
+    // PERF: linear in the number of live `ScenePatchInstance` entities, but only when an asset
+    // (re)loads. `QueryState::iter` updates archetypes internally, so instances spawned earlier
+    // this frame are visible.
+    let patches = world.resource::<Assets<ScenePatch>>();
+    let instances: Vec<(Entity, AssetId<ScenePatch>)> = scene_patch_instances
+        .iter(world)
+        .filter(|(_, instance, state)| {
+            // `applied` is what keeps this disjoint from the first-apply path: an instance still
+            // waiting for its first application is not re-applied here.
+            //
+            // The `patch_depends_on` arm is what updates an instance of a scene that merely
+            // *includes* the changed one. Such a scene reads its base's resolved scene fresh on
+            // every apply, so re-applying it is all that is needed.
+            state.applied
+                && (instance.0.id() == id || patch_depends_on(patches, instance.0.id(), id))
+        })
+        .map(|(entity, instance, _)| (entity, instance.0.id()))
+        .collect();
+
+    for (entity, instance_id) in instances {
+        // Each instance is re-applied from *its own* patch, which is not necessarily the asset
+        // that changed: a dependent's resolved scene is what merges the new base content with the
+        // dependent's own patches.
+        let Some(resolved) = world
+            .resource::<Assets<ScenePatch>>()
+            .get(instance_id)
+            .and_then(|patch| patch.resolved.clone())
+        else {
+            continue;
+        };
+
+        let previous = world
+            .get_mut::<SceneInstanceState>(entity)
+            .map(|mut state| core::mem::take(&mut state.spawned))
+            .unwrap_or_default();
+        for spawned in previous {
+            if let Ok(entity_mut) = world.get_entity_mut(spawned) {
+                // Despawning is recursive through linked-spawn relationships such as `Children`,
+                // so descendants added at runtime go too. That is the documented state loss.
+                entity_mut.despawn();
+            }
+        }
+
+        if let Err(err) = apply_to_instance(world, entity, &resolved, bundle_scratch) {
+            error!(
+                "Failed to re-apply reloaded scene (id: {instance_id}) to entity {entity}: {err}"
+            );
+        }
+    }
+}
+
 /// A [`Resource`] that tracks entities / scenes that have been queued to spawn.
 #[derive(Resource, Default)]
 pub struct QueuedScenes {
@@ -742,7 +929,7 @@ pub fn on_add_scene_patch_instance(
 /// A system that spawns queued scenes when they are loaded.
 pub fn spawn_queued(
     world: &mut World,
-    scene_patch_instances: &mut QueryState<&ScenePatchInstance>,
+    scene_patch_instances: &mut QueryState<(Entity, &ScenePatchInstance, &SceneInstanceState)>,
     mut queued: Local<QueuedScenes>,
     mut bundle_scratch: Local<BundleScratch>,
     mut reader: Local<MessageCursor<AssetEvent<ScenePatch>>>,
@@ -751,16 +938,39 @@ pub fn spawn_queued(
     world.resource_scope(|world, mut list_patches: Mut<Assets<SceneListPatch>>| {
         world.resource_scope(|world, mut waiting: Mut<WaitingScenes>| {
             world.resource_scope(|world, events: Mut<Messages<AssetEvent<ScenePatch>>>| {
-                for event in reader.read(&events) {
+                // Collapse duplicate events for the same asset within this frame, which is what
+                // two reload tasks completing in the same frame look like. We deliberately do not
+                // debounce across frames the way `bevy_world_serialization`'s
+                // `world_asset_spawner.rs:88` does: that exists to absorb glTF sub-asset loads,
+                // and `ScenePatch` has no sub-assets, so a frame counter would only add latency
+                // and could swallow a genuine second edit.
+                let mut loaded: Vec<AssetId<ScenePatch>> = reader
+                    .read(&events)
+                    .filter_map(|event| match event {
+                        AssetEvent::LoadedWithDependencies { id } => Some(*id),
+                        _ => None,
+                    })
+                    .collect();
+                loaded.sort_unstable();
+                loaded.dedup();
+
+                // The re-apply (hot reload) pass runs *before* the first-apply pass below. Both
+                // are driven by the same event, and running them in this order is what keeps their
+                // instance sets disjoint: at this point an instance still waiting for its first
+                // application has `applied == false` and is skipped here, and the loop below then
+                // applies it exactly once, from the already-refreshed `resolved`.
+                for id in loaded.iter().copied() {
+                    reapply_instances(world, id, scene_patch_instances, &mut bundle_scratch);
+                }
+
+                for id in loaded.iter() {
                     let patches = world.resource::<Assets<ScenePatch>>();
-                    if let AssetEvent::LoadedWithDependencies { id } = event
-                        && let Some(resolved) = patches.get(*id).and_then(|p| p.resolved.clone())
+                    if let Some(resolved) = patches.get(*id).and_then(|p| p.resolved.clone())
                         && let Some(entities) = waiting.scene_entities.remove(id)
                     {
                         for entity in entities {
-                            if let Ok(mut entity_mut) = world.get_entity_mut(entity)
-                                && let Err(err) =
-                                    resolved.apply(&mut entity_mut, &mut bundle_scratch)
+                            if let Err(err) =
+                                apply_to_instance(world, entity, &resolved, &mut bundle_scratch)
                             {
                                 error!(
                                     "Failed to apply scene (id: {}) to entity {entity}: {}",
@@ -810,13 +1020,7 @@ pub fn spawn_queued(
                 if queued.is_empty() {
                     break;
                 }
-                queued.spawn_queued(
-                    world,
-                    &mut waiting,
-                    scene_patch_instances,
-                    &mut bundle_scratch,
-                    &list_patches,
-                );
+                queued.spawn_queued(world, &mut waiting, &mut bundle_scratch, &list_patches);
             }
         });
     });
@@ -833,17 +1037,13 @@ impl QueuedScenes {
         &mut self,
         world: &mut World,
         waiting_scenes: &mut WaitingScenes,
-        scene_patch_instances: &mut QueryState<&ScenePatchInstance>,
         bundle_scratch: &mut BundleScratch,
         list_patches: &Assets<SceneListPatch>,
     ) {
         for (entity, handle) in core::mem::take(&mut self.new_scene_entities) {
             let patches = world.resource::<Assets<ScenePatch>>();
             if let Some(resolved) = patches.get(&handle).and_then(|p| p.resolved.clone()) {
-                let mut entity_mut = world.get_entity_mut(entity).unwrap();
-                if let Err(err) = resolved.apply(&mut entity_mut, bundle_scratch) {
-                    let scene_patch_instance = scene_patch_instances.get(world, entity).unwrap();
-                    let handle = &scene_patch_instance.0;
+                if let Err(err) = apply_to_instance(world, entity, &resolved, bundle_scratch) {
                     let id = handle.id();
                     let path = handle.path();
                     error!(
@@ -904,11 +1104,24 @@ impl QueuedScenes {
 
 #[cfg(test)]
 mod tests {
-    use super::EntityWorldMutSceneExt;
-    use crate::{self as bevy_scene, bsn, ScenePlugin};
-    use bevy_app::{App, TaskPoolPlugin};
-    use bevy_asset::AssetPlugin;
+    use super::{EntityWorldMutSceneExt, WorldSceneExt};
+    use crate::ScenePlugin;
+    use crate::{
+        self as bevy_scene, bsn, Scene, SceneInstanceState, ScenePatch, ScenePatchInstance,
+    };
+    use alloc::sync::Arc;
+    use bevy_app::{App, Last, TaskPoolPlugin};
+    use bevy_asset::{
+        io::{
+            memory::{Dir, MemoryAssetReader},
+            AssetSourceBuilder, AssetSourceId,
+        },
+        AssetApp, AssetEvent, AssetLoader, AssetPlugin, AssetServer, Assets, Handle,
+    };
     use bevy_ecs::{name::Name, prelude::*, template::FromTemplate};
+    use bevy_platform::collections::HashMap;
+    use bevy_reflect::TypePath;
+    use std::{path::Path, sync::Mutex};
 
     fn test_app() -> App {
         let mut app = App::new();
@@ -958,5 +1171,601 @@ mod tests {
         // Pre-existing child entity still exists, but is no longer listed under root.
         assert!(world.get_entity(pre_existing).is_ok());
         assert!(!children.contains(&pre_existing));
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Hot reload
+    //
+    // These tests drive the real reload pipeline — `AssetServer::reload` re-runs a loader, which
+    // replaces the whole `ScenePatch` value and re-fires `LoadedWithDependencies` — rather than
+    // hand-writing `AssetEvent`s, which could not reproduce either the event ordering or the
+    // whole-value replacement that the design depends on.
+    //
+    // They use a fake loader rather than `DynamicBsnLoader`, so they hold without the `bsn_asset`
+    // feature and cover third-party `AssetLoader<Asset = ScenePatch>` implementations too. The
+    // same scenarios are mirrored with real `.bsn` text in `tests/dynamic_bsn.rs`.
+    // ---------------------------------------------------------------------------------------
+
+    /// What a fake "file" currently contains.
+    enum FakeSource {
+        /// The file parses, and produces this scene.
+        Scene(Box<dyn Fn() -> Box<dyn Scene> + Send + Sync>),
+        /// The file no longer parses, so its loader fails — exactly what a `.bsn` syntax error
+        /// does.
+        ParseError,
+    }
+
+    /// The in-memory "disk" behind [`FakeSceneLoader`], shared with the test body.
+    #[derive(Clone, Default)]
+    struct FakeScenes(Arc<Mutex<HashMap<String, FakeSource>>>);
+
+    impl FakeScenes {
+        /// Writes `scene_fn` to `path`, overwriting whatever was there before. This is the
+        /// "edit the file" primitive; [`AssetServer::reload`] is the "save" that follows it.
+        fn write<S: Scene>(&self, path: &str, scene_fn: impl Fn() -> S + Send + Sync + 'static) {
+            self.0.lock().unwrap().insert(
+                path.to_string(),
+                FakeSource::Scene(Box::new(move || Box::new(scene_fn()))),
+            );
+        }
+
+        /// Replaces `path`'s contents with something that no longer parses.
+        fn write_parse_error(&self, path: &str) {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(path.to_string(), FakeSource::ParseError);
+        }
+    }
+
+    #[derive(TypePath)]
+    struct FakeSceneLoader(FakeScenes);
+
+    impl AssetLoader for FakeSceneLoader {
+        type Asset = ScenePatch;
+        type Error = std::io::Error;
+        type Settings = ();
+
+        async fn load(
+            &self,
+            _reader: &mut dyn bevy_asset::io::Reader,
+            _settings: &Self::Settings,
+            load_context: &mut bevy_asset::LoadContext<'_>,
+        ) -> Result<Self::Asset, Self::Error> {
+            let path = load_context.path().path().to_string_lossy().into_owned();
+            let scene = {
+                let scenes = self.0 .0.lock().unwrap();
+                match scenes.get(&path) {
+                    Some(FakeSource::Scene(scene_fn)) => scene_fn(),
+                    Some(FakeSource::ParseError) => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("{path} does not parse"),
+                        ))
+                    }
+                    None => return Err(std::io::Error::new(std::io::ErrorKind::NotFound, path)),
+                }
+            };
+            Ok(ScenePatch::load_with(load_context, scene))
+        }
+
+        /// A dedicated extension, so that this loader is picked rather than the real
+        /// `DynamicBsnLoader` that `ScenePlugin` registers for `.bsn`.
+        fn extensions(&self) -> &[&str] {
+            &["fakescene"]
+        }
+    }
+
+    /// Builds an [`App`] whose `.fakescene` assets come from `scenes`. `files` must list every
+    /// path the test will load: the asset source has to have *something* at that path, even
+    /// though the fake loader ignores the bytes.
+    fn hot_reload_app(scenes: &FakeScenes, files: &[&str]) -> App {
+        let mut app = App::new();
+        let dir = Dir::default();
+        let reader_dir = dir.clone();
+        app.register_asset_source(
+            AssetSourceId::Default,
+            AssetSourceBuilder::new(move || {
+                Box::new(MemoryAssetReader {
+                    root: reader_dir.clone(),
+                })
+            }),
+        );
+        app.add_plugins((
+            TaskPoolPlugin::default(),
+            AssetPlugin::default(),
+            ScenePlugin,
+        ));
+        app.finish();
+        app.cleanup();
+        app.register_asset_loader(FakeSceneLoader(scenes.clone()));
+        for file in files {
+            dir.insert_asset_text(Path::new(file), "");
+        }
+        app
+    }
+
+    /// Pumps `app` until `predicate` holds, or panics. The bound turns "never reloads" into a
+    /// test failure instead of a hang.
+    fn run_app_until(app: &mut App, mut predicate: impl FnMut(&mut App) -> bool) {
+        const MAX_FRAMES: usize = 1000;
+        for _ in 0..MAX_FRAMES {
+            app.update();
+            if predicate(app) {
+                return;
+            }
+        }
+        panic!("the app never reached the expected state");
+    }
+
+    /// Loads `path` and pumps until it has been resolved.
+    fn load_and_settle(app: &mut App, path: &'static str) -> Handle<ScenePatch> {
+        let asset_server = app.world().resource::<AssetServer>().clone();
+        let handle = asset_server.load::<ScenePatch>(path);
+        let probe = handle.clone();
+        run_app_until(app, |app| {
+            app.world()
+                .resource::<Assets<ScenePatch>>()
+                .get(&probe)
+                .is_some_and(|patch| patch.resolved.is_some())
+        });
+        handle
+    }
+
+    /// "Saves" `path`: re-runs its loader against whatever [`FakeScenes`] now holds.
+    fn reload(app: &App, path: &'static str) {
+        app.world().resource::<AssetServer>().reload(path);
+    }
+
+    #[derive(Component, FromTemplate, Debug, PartialEq)]
+    struct Position {
+        x: f32,
+        y: f32,
+    }
+
+    #[derive(Component, Default, Clone)]
+    struct HotMarker;
+
+    /// Names of `root`'s children, in order.
+    fn child_names(app: &App, root: Entity) -> Vec<String> {
+        app.world()
+            .get::<Children>(root)
+            .map(|children| {
+                children
+                    .iter()
+                    .map(|child| {
+                        app.world()
+                            .get::<Name>(child)
+                            .map(|name| name.as_str().to_string())
+                            .unwrap_or_default()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn hot_reload_replaces_root_components() {
+        let scenes = FakeScenes::default();
+        scenes.write("a.fakescene", || bsn! { Position { x: 1. } });
+        let mut app = hot_reload_app(&scenes, &["a.fakescene"]);
+
+        let handle = load_and_settle(&mut app, "a.fakescene");
+        let root = app.world_mut().spawn(ScenePatchInstance(handle)).id();
+        run_app_until(&mut app, |app| app.world().get::<Position>(root).is_some());
+        assert_eq!(app.world().get::<Position>(root).unwrap().x, 1.);
+
+        scenes.write("a.fakescene", || bsn! { Position { x: 5. } });
+        reload(&app, "a.fakescene");
+        run_app_until(&mut app, |app| {
+            app.world().get::<Position>(root).unwrap().x == 5.
+        });
+    }
+
+    #[test]
+    fn hot_reload_despawns_previous_children() {
+        let scenes = FakeScenes::default();
+        scenes.write("a.fakescene", || bsn! { Children [ #A, #B ] });
+        let mut app = hot_reload_app(&scenes, &["a.fakescene"]);
+
+        let handle = load_and_settle(&mut app, "a.fakescene");
+        let root = app.world_mut().spawn(ScenePatchInstance(handle)).id();
+        run_app_until(&mut app, |app| app.world().get::<Children>(root).is_some());
+
+        let previous: Vec<Entity> = app
+            .world()
+            .get::<Children>(root)
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>();
+        assert_eq!(previous.len(), 2);
+
+        scenes.write("a.fakescene", || bsn! { Children [ #C ] });
+        reload(&app, "a.fakescene");
+        run_app_until(&mut app, |app| child_names(app, root) == ["C"]);
+
+        // The regression this whole design exists for (bevyengine/bevy#24939): re-applying a scene
+        // only *unlinks* the previous children, so without an explicit despawn they survive as
+        // parentless ghosts carrying all their components and observers.
+        for entity in previous {
+            assert!(
+                app.world().get_entity(entity).is_err(),
+                "the previous generation of children must be despawned, not orphaned"
+            );
+        }
+    }
+
+    #[test]
+    fn hot_reload_no_orphaned_entities() {
+        let scenes = FakeScenes::default();
+        scenes.write("a.fakescene", || bsn! { Children [ #A, #B ] });
+        let mut app = hot_reload_app(&scenes, &["a.fakescene"]);
+
+        let handle = load_and_settle(&mut app, "a.fakescene");
+        let before = app.world().entities().count_spawned();
+        let root = app.world_mut().spawn(ScenePatchInstance(handle)).id();
+        run_app_until(&mut app, |app| app.world().get::<Children>(root).is_some());
+        // The root plus its two children.
+        assert_eq!(app.world().entities().count_spawned(), before + 3);
+
+        scenes.write("a.fakescene", || bsn! { Children [ #C ] });
+        reload(&app, "a.fakescene");
+        run_app_until(&mut app, |app| child_names(app, root) == ["C"]);
+
+        assert_eq!(
+            app.world().entities().count_spawned(),
+            before + 2,
+            "a reload must leave exactly the root and the new generation of children"
+        );
+    }
+
+    #[test]
+    fn hot_reload_preserves_instance_entity() {
+        let scenes = FakeScenes::default();
+        scenes.write("a.fakescene", || bsn! { Position { x: 1. } });
+        let mut app = hot_reload_app(&scenes, &["a.fakescene"]);
+
+        let handle = load_and_settle(&mut app, "a.fakescene");
+        let root = app.world_mut().spawn(ScenePatchInstance(handle)).id();
+        let parent = app.world_mut().spawn(HotMarker).add_child(root).id();
+        run_app_until(&mut app, |app| app.world().get::<Position>(root).is_some());
+
+        scenes.write("a.fakescene", || bsn! { Position { x: 5. } });
+        reload(&app, "a.fakescene");
+        run_app_until(&mut app, |app| {
+            app.world().get::<Position>(root).unwrap().x == 5.
+        });
+
+        assert!(app.world().get_entity(root).is_ok());
+        assert_eq!(
+            app.world().get::<ChildOf>(root).map(|child_of| child_of.0),
+            Some(parent),
+            "the instance entity itself is never despawned, so its parent link survives"
+        );
+    }
+
+    #[test]
+    fn hot_reload_applies_to_all_instances() {
+        let scenes = FakeScenes::default();
+        scenes.write("a.fakescene", || bsn! { Position { x: 1. } });
+        let mut app = hot_reload_app(&scenes, &["a.fakescene"]);
+
+        let handle = load_and_settle(&mut app, "a.fakescene");
+        let roots: Vec<Entity> = (0..3)
+            .map(|_| {
+                app.world_mut()
+                    .spawn(ScenePatchInstance(handle.clone()))
+                    .id()
+            })
+            .collect();
+        run_app_until(&mut app, |app| {
+            app.world().get::<Position>(roots[2]).is_some()
+        });
+
+        scenes.write("a.fakescene", || bsn! { Position { x: 5. } });
+        reload(&app, "a.fakescene");
+        run_app_until(&mut app, |app| {
+            app.world().get::<Position>(roots[0]).unwrap().x == 5.
+        });
+
+        for root in roots {
+            assert_eq!(
+                app.world().get::<Position>(root).unwrap().x,
+                5.,
+                "every instance is updated in the same frame"
+            );
+        }
+    }
+
+    #[test]
+    fn hot_reload_of_base_updates_dependent_file_instances() {
+        let scenes = FakeScenes::default();
+        scenes.write("base.fakescene", || bsn! { Position { x: 1., y: 1. } });
+        // `derived` patches `Position` too, so it takes a copy-on-write snapshot of the base's
+        // template at resolve time. That snapshot is exactly what goes stale.
+        scenes.write("derived.fakescene", || {
+            bsn! { :"base.fakescene" Position { x: 2. } }
+        });
+        let mut app = hot_reload_app(&scenes, &["base.fakescene", "derived.fakescene"]);
+
+        let handle = load_and_settle(&mut app, "derived.fakescene");
+        let root = app.world_mut().spawn(ScenePatchInstance(handle)).id();
+        run_app_until(&mut app, |app| app.world().get::<Position>(root).is_some());
+        assert_eq!(
+            *app.world().get::<Position>(root).unwrap(),
+            Position { x: 2., y: 1. }
+        );
+
+        scenes.write("base.fakescene", || bsn! { Position { x: 1., y: 9. } });
+        reload(&app, "base.fakescene");
+        run_app_until(&mut app, |app| {
+            app.world().get::<Position>(root).unwrap().y == 9.
+        });
+
+        assert_eq!(
+            *app.world().get::<Position>(root).unwrap(),
+            Position { x: 2., y: 9. },
+            "the dependent file must be re-resolved so its copy-on-write snapshot is rebuilt, \
+             while its own patch still wins"
+        );
+    }
+
+    #[test]
+    fn hot_reload_of_base_updates_bsn_macro_instances() {
+        let scenes = FakeScenes::default();
+        scenes.write("base.fakescene", || bsn! { Children [ #A ] });
+        let mut app = hot_reload_app(&scenes, &["base.fakescene"]);
+        load_and_settle(&mut app, "base.fakescene");
+
+        // An in-code scene has no asset path, so it cannot be reloaded — but it reads its base's
+        // resolved scene fresh on every apply, so re-applying it is enough.
+        let root = app
+            .world_mut()
+            .queue_spawn_scene(bsn! { :"base.fakescene" HotMarker })
+            .id();
+        run_app_until(&mut app, |app| app.world().get::<Children>(root).is_some());
+        assert_eq!(child_names(&app, root), ["A"]);
+
+        scenes.write("base.fakescene", || bsn! { Children [ #B, #C ] });
+        reload(&app, "base.fakescene");
+        run_app_until(&mut app, |app| child_names(app, root) == ["B", "C"]);
+    }
+
+    #[test]
+    fn hot_reload_of_base_does_not_update_macro_overlap() {
+        let scenes = FakeScenes::default();
+        scenes.write("base.fakescene", || {
+            bsn! { Position { x: 1., y: 1. } Children [ #A ] }
+        });
+        let mut app = hot_reload_app(&scenes, &["base.fakescene"]);
+        load_and_settle(&mut app, "base.fakescene");
+
+        let root = app
+            .world_mut()
+            .queue_spawn_scene(bsn! { :"base.fakescene" Position { x: 2. } })
+            .id();
+        run_app_until(&mut app, |app| app.world().get::<Position>(root).is_some());
+        assert_eq!(
+            *app.world().get::<Position>(root).unwrap(),
+            Position { x: 2., y: 1. }
+        );
+
+        scenes.write("base.fakescene", || {
+            bsn! { Position { x: 1., y: 9. } Children [ #B ] }
+        });
+        reload(&app, "base.fakescene");
+        run_app_until(&mut app, |app| child_names(app, root) == ["B"]);
+
+        // This pins the documented limitation. An in-code `bsn!` scene that both includes a scene
+        // asset and patches a component the base also patches froze the base's values for that
+        // component at its first (and only) resolve: its `Scene` was consumed by value and there
+        // is no file to re-read. Everything else about the instance is live.
+        assert_eq!(
+            *app.world().get::<Position>(root).unwrap(),
+            Position { x: 2., y: 1. },
+            "the copy-on-write overlap set of an in-code scene cannot be refreshed; move the \
+             overlapping patch into a scene asset to get full hot reload"
+        );
+    }
+
+    #[test]
+    fn hot_reload_parse_error_keeps_previous_scene() {
+        let scenes = FakeScenes::default();
+        scenes.write(
+            "a.fakescene",
+            || bsn! { Position { x: 1. } Children [ #A ] },
+        );
+        let mut app = hot_reload_app(&scenes, &["a.fakescene"]);
+
+        let handle = load_and_settle(&mut app, "a.fakescene");
+        let root = app.world_mut().spawn(ScenePatchInstance(handle)).id();
+        run_app_until(&mut app, |app| app.world().get::<Position>(root).is_some());
+        let child = app.world().get::<Children>(root).unwrap()[0];
+
+        scenes.write_parse_error("a.fakescene");
+        reload(&app, "a.fakescene");
+        for _ in 0..20 {
+            app.update();
+        }
+
+        assert_eq!(app.world().get::<Position>(root).unwrap().x, 1.);
+        assert!(
+            app.world().get_entity(child).is_ok(),
+            "a broken edit must leave the last good version rendering, untouched"
+        );
+        assert_eq!(child_names(&app, root), ["A"]);
+    }
+
+    #[test]
+    fn hot_reload_invalidates_external_entity_references() {
+        let scenes = FakeScenes::default();
+        scenes.write("a.fakescene", || bsn! { Children [ #A ] });
+        let mut app = hot_reload_app(&scenes, &["a.fakescene"]);
+
+        let handle = load_and_settle(&mut app, "a.fakescene");
+        let root = app.world_mut().spawn(ScenePatchInstance(handle)).id();
+        run_app_until(&mut app, |app| app.world().get::<Children>(root).is_some());
+        let held = app.world().get::<Children>(root).unwrap()[0];
+
+        scenes.write("a.fakescene", || bsn! { Children [ #A ] });
+        reload(&app, "a.fakescene");
+        run_app_until(&mut app, |app| {
+            app.world().get::<Children>(root).unwrap()[0] != held
+        });
+
+        // Documented state loss: a reload rebuilds the scene, so `Entity` ids held outside it —
+        // in a resource, another component, an observer — dangle afterwards.
+        assert!(app.world().get_entity(held).is_err());
+    }
+
+    #[test]
+    fn hot_reload_during_pending_spawn() {
+        let scenes = FakeScenes::default();
+        scenes.write("a.fakescene", || bsn! { Children [ #A ] });
+        let mut app = hot_reload_app(&scenes, &["a.fakescene"]);
+
+        let asset_server = app.world().resource::<AssetServer>().clone();
+        let handle = asset_server.load::<ScenePatch>("a.fakescene");
+        let root = app.world_mut().spawn(ScenePatchInstance(handle)).id();
+
+        // Edit and save before the instance has ever been applied.
+        scenes.write("a.fakescene", || bsn! { Children [ #B ] });
+        asset_server.reload("a.fakescene");
+
+        run_app_until(&mut app, |app| child_names(app, root) == ["B"]);
+        for _ in 0..10 {
+            app.update();
+        }
+
+        assert_eq!(
+            child_names(&app, root),
+            ["B"],
+            "the instance must be applied exactly once, with the new content"
+        );
+    }
+
+    #[test]
+    fn hot_reload_twice_in_one_frame_applies_once() {
+        let scenes = FakeScenes::default();
+        scenes.write("a.fakescene", || bsn! { Children [ #A ] });
+        let mut app = hot_reload_app(&scenes, &["a.fakescene"]);
+
+        let handle = load_and_settle(&mut app, "a.fakescene");
+        let before = app.world().entities().count_spawned();
+        let root = app.world_mut().spawn(ScenePatchInstance(handle)).id();
+        run_app_until(&mut app, |app| app.world().get::<Children>(root).is_some());
+
+        scenes.write("a.fakescene", || bsn! { Children [ #B ] });
+        reload(&app, "a.fakescene");
+        reload(&app, "a.fakescene");
+        run_app_until(&mut app, |app| child_names(app, root) == ["B"]);
+        for _ in 0..10 {
+            app.update();
+        }
+
+        assert_eq!(child_names(&app, root), ["B"]);
+        assert_eq!(
+            app.world().entities().count_spawned(),
+            before + 2,
+            "two reloads landing together must produce one despawn/apply cycle, not two"
+        );
+    }
+
+    #[derive(Resource, Default)]
+    struct ModifiedCount(usize);
+
+    fn count_modified(
+        mut events: MessageReader<AssetEvent<ScenePatch>>,
+        mut count: ResMut<ModifiedCount>,
+    ) {
+        for event in events.read() {
+            if matches!(event, AssetEvent::Modified { .. }) {
+                count.0 += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_does_not_emit_modified() {
+        let scenes = FakeScenes::default();
+        scenes.write("a.fakescene", || bsn! { Position { x: 1. } });
+        let mut app = hot_reload_app(&scenes, &["a.fakescene"]);
+        app.init_resource::<ModifiedCount>();
+        app.add_systems(Last, count_modified);
+
+        let handle = load_and_settle(&mut app, "a.fakescene");
+        let root = app.world_mut().spawn(ScenePatchInstance(handle)).id();
+        run_app_until(&mut app, |app| app.world().get::<Position>(root).is_some());
+        for _ in 0..5 {
+            app.update();
+        }
+
+        // Resolution writes through `get_mut_untracked`, so `Modified` on `ScenePatch` now means
+        // "the asset actually changed" rather than "the scene system did its bookkeeping".
+        assert_eq!(app.world().resource::<ModifiedCount>().0, 0);
+    }
+
+    #[test]
+    fn queued_scene_gains_scene_patch_instance() {
+        let mut app = test_app();
+        let root = app.world_mut().queue_spawn_scene(bsn! { HotMarker }).id();
+        app.update();
+
+        assert!(app.world().get::<ScenePatchInstance>(root).is_some());
+        let state = app.world().get::<SceneInstanceState>(root).unwrap();
+        assert!(state.applied);
+        assert!(app.world().get::<HotMarker>(root).is_some());
+    }
+
+    #[test]
+    fn scene_instance_state_records_all_spawned() {
+        let mut app = test_app();
+        let root = app
+            .world_mut()
+            .queue_spawn_scene(bsn! {
+                Children [
+                    (#A Children [ #A1, #A2 ]),
+                    #B,
+                ]
+            })
+            .id();
+        app.update();
+
+        let mut descendants: Vec<Entity> = Vec::new();
+        let mut stack = vec![root];
+        while let Some(entity) = stack.pop() {
+            if let Some(children) = app.world().get::<Children>(entity) {
+                for child in children.iter() {
+                    descendants.push(child);
+                    stack.push(child);
+                }
+            }
+        }
+        descendants.sort_unstable();
+        assert_eq!(descendants.len(), 4);
+
+        let state = app.world().get::<SceneInstanceState>(root).unwrap();
+        assert!(state.applied);
+        assert_eq!(
+            state.spawned, descendants,
+            "every entity the scene spawned is recorded, sorted and deduplicated"
+        );
+        assert!(
+            !state.spawned.contains(&root),
+            "the instance entity itself is never recorded: it is not despawned on reload"
+        );
+    }
+
+    #[test]
+    fn immediate_spawn_does_not_record() {
+        // `World::spawn_scene` has no asset identity and can never hot reload, so it must not pay
+        // for the recording. This is the observable half of that: nothing is written down.
+        let mut app = test_app();
+        let root = app
+            .world_mut()
+            .spawn_scene(bsn! { Children [ #A ] })
+            .unwrap()
+            .id();
+        assert!(app.world().get::<SceneInstanceState>(root).is_none());
     }
 }

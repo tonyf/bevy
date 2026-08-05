@@ -898,6 +898,41 @@
 //!
 //! See the `dynamic_bsn` example for a complete walkthrough.
 //!
+//! ## Hot reload
+//!
+//! Entities spawned from a scene asset through [`ScenePatchInstance`] update live when that asset
+//! changes. Turn on asset watching (the `bevy_asset/file_watcher` feature, or
+//! `AssetPlugin { watch_for_changes_override: Some(true), .. }`), edit a `.bsn` file, and every
+//! live instance of it is rebuilt from the new definition within a frame or two — including
+//! instances of other `.bsn` files that inherit it with `:"base.bsn"`, and in-code [`bsn!`] scenes
+//! that inherit it. Calling [`AssetServer::reload`] by hand has exactly the same effect, and needs
+//! no watcher.
+//!
+//! Reloading is a **rebuild, not a reconciliation**. Everything the previous application of the
+//! scene spawned — recorded on each instance in [`SceneInstanceState::spawned`] — is despawned,
+//! then the scene is applied to the instance entity again. So:
+//!
+//! - Runtime state on scene-spawned entities, and entities added under them at runtime, are lost.
+//! - [`Entity`] ids pointing into the scene dangle after a reload.
+//! - Components the edited file no longer declares are *not* removed from the instance entity;
+//!   applying a scene only ever writes. Respawn the instance to pick that up.
+//! - The instance entity itself is never despawned, so its id and its relationship to its parent
+//!   survive.
+//!
+//! A file that stops parsing (or stops resolving) leaves every live instance rendering the last
+//! good version and logs the error; fixing the file brings the instance back.
+//!
+//! Two things do not hot reload. Immediately-spawned scenes ([`World::spawn_scene`],
+//! [`EntityWorldMut::apply_scene`]) never enter `Assets<ScenePatch>`, so they have no asset
+//! identity to key off. And an in-code [`bsn!`] scene that inherits a `.bsn` base *and* patches a
+//! component the base also patches keeps that component's base values as of the first resolve: its
+//! `Scene` was consumed by value at resolve time and there is no file to re-read. Children,
+//! non-overlapping components and entity references of such a scene all still reload correctly;
+//! move the overlapping patch into a `.bsn` file for full hot reload.
+//!
+//! [`AssetServer::reload`]: bevy_asset::AssetServer::reload
+//! [`EntityWorldMut::apply_scene`]: crate::EntityWorldMutSceneExt::apply_scene
+//!
 //! [`Template`]: bevy_ecs::template::Template
 //! [`FromTemplate`]: bevy_ecs::template::FromTemplate
 //! [`Reflect`]: bevy_reflect::Reflect
@@ -920,8 +955,9 @@ pub mod prelude {
     pub use crate::DynamicBsnLoader;
     pub use crate::{
         bsn, bsn_list, on, template_value, CommandsSceneExt, EntityCommandsSceneExt,
-        EntityWorldMutSceneExt, PatchFromTemplate, PatchTemplate, Scene, SceneComponent, SceneList,
-        ScenePatchInstance, SpawnListSystem, SpawnSystem, WorldSceneExt,
+        EntityWorldMutSceneExt, PatchFromTemplate, PatchTemplate, Scene, SceneComponent,
+        SceneInstanceState, SceneList, ScenePatchInstance, SpawnListSystem, SpawnSystem,
+        WorldSceneExt,
     };
 }
 
