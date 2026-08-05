@@ -12,6 +12,8 @@ use crate::{
 };
 use alloc::vec::Vec;
 use bevy_platform::{collections::hash_map::RawEntryMut, hash::Hashed};
+#[cfg(feature = "bevy_reflect")]
+use bevy_reflect::std_traits::ReflectDefault;
 use bevy_utils::PreHashMap;
 use indexmap::Equivalent;
 use variadics_please::all_tuples;
@@ -139,6 +141,11 @@ impl SceneEntityReferences {
 /// - the `name_id` should uniquely identify a name in the individual macros scope
 /// - runtime, per-scope counter for each runtime call (usually from a static `AtomicU64`)
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+#[cfg_attr(feature = "bevy_reflect", derive(bevy_reflect::Reflect))]
+#[cfg_attr(
+    feature = "bevy_reflect",
+    reflect(opaque, Clone, PartialEq, Hash, Debug)
+)]
 pub struct SceneEntityReference(Hashed<InnerSceneEntityReference>);
 
 /// The inner struct actually storing the unique index
@@ -345,6 +352,42 @@ impl Equivalent<Hashed<InnerSceneEntityReference>> for SceneEntityReference {
 ///     image: Option<Handle<Image>>
 /// }
 /// ```
+/// ## Making the generated template reflectable
+///
+/// By default the generated template type derives nothing, so it is not
+/// [`Reflect`](bevy_reflect::Reflect). Reflection-driven scene formats (e.g. dynamically loaded
+/// `.bsn` assets) need to *construct and patch* the template from data alone, which requires it
+/// to be reflectable. Opt in with the container-level `#[template(reflect)]` attribute:
+///
+/// ```
+/// # use bevy_ecs::prelude::*;
+/// # use bevy_reflect::prelude::*;
+/// #[derive(Component, FromTemplate, Reflect)]
+/// #[reflect(Component, FromTemplate)]
+/// #[template(reflect)]
+/// struct Score {
+///     points: u32,
+/// }
+/// ```
+///
+/// This makes the generated `ScoreTemplate` derive
+/// [`Reflect`](bevy_reflect::Reflect) and register
+/// [`ReflectDefault`] and
+/// [`ReflectTemplate`](crate::reflect::ReflectTemplate) type data (plus the
+/// `ReflectFromReflect` the `Reflect` derive always adds).
+///
+/// Two requirements come with it:
+///
+/// * the deriving type itself must be [`Reflect`](bevy_reflect::Reflect), because
+///   [`ReflectTemplate`](crate::reflect::ReflectTemplate) is only registerable for templates
+///   whose [`Template::Output`] is reflectable;
+/// * **every** field's template type must itself be [`Reflect`](bevy_reflect::Reflect) — for a
+///   field whose template comes from another `#[derive(FromTemplate)]` type, that means the
+///   other type needs `#[template(reflect)]` too.
+///
+/// Pair it with `#[reflect(FromTemplate)]` on the component so that consumers can find the
+/// template type from the component type; see
+/// [`ReflectFromTemplate`](crate::reflect::ReflectFromTemplate).
 pub trait FromTemplate: Sized {
     /// The [`Template`] for this type.
     type Template: Template<Output = Self>;
@@ -419,6 +462,11 @@ pub trait SpecializeFromTemplate: Sized {}
 ///
 /// This is only valid during scene spawning and should **never** be used as a [`Component`](bevy_ecs::prelude::Component) field.
 #[derive(Copy, Clone, Default, Debug)]
+#[cfg_attr(feature = "bevy_reflect", derive(bevy_reflect::Reflect))]
+#[cfg_attr(
+    feature = "bevy_reflect",
+    reflect(Default, Clone, Debug, crate::reflect::Template)
+)]
 pub enum EntityTemplate {
     /// A reference to a specific [`Entity`]
     Entity(Entity),
@@ -519,6 +567,7 @@ impl<T: FromTemplate> BuiltInTemplate for Vec<T> {
 
 /// A [`Template`] for [`Option`].
 #[derive(Default)]
+#[cfg_attr(feature = "bevy_reflect", derive(bevy_reflect::Reflect))]
 pub enum OptionTemplate<T> {
     /// Template of [`Option::Some`].
     Some(T),
@@ -561,6 +610,7 @@ impl<T: Template> Template for OptionTemplate<T> {
 }
 
 /// A [`Template`] for [`Vec`].
+#[cfg_attr(feature = "bevy_reflect", derive(bevy_reflect::Reflect))]
 pub struct VecTemplate<T>(pub Vec<T>);
 
 impl<T> Default for VecTemplate<T> {
@@ -589,6 +639,123 @@ impl<T: Template> Template for VecTemplate<T> {
 mod tests {
     use crate::prelude::*;
     use alloc::string::{String, ToString};
+
+    #[cfg(feature = "bevy_reflect")]
+    mod reflect {
+        use crate::{
+            entity::Entity,
+            prelude::*,
+            reflect::{try_from_reflect_with_fallback, ReflectTemplate},
+            template::{EntityTemplate, OptionTemplate, SceneEntityReference, VecTemplate},
+        };
+        use bevy_reflect::{
+            std_traits::ReflectDefault, structs::DynamicStruct, PartialReflect, Reflect,
+            ReflectFromReflect, ReflectRef, TypeRegistry,
+        };
+        use core::any::TypeId;
+
+        #[derive(FromTemplate, Reflect, PartialEq, Debug)]
+        #[template(reflect)]
+        struct Foo {
+            count: usize,
+            other: usize,
+        }
+
+        /// A `#[derive(FromTemplate)]` without `#[template(reflect)]` still compiles, and its
+        /// template simply is not `Reflect`.
+        #[derive(FromTemplate)]
+        struct NotReflected {
+            #[expect(dead_code, reason = "only used to prove the derive still compiles")]
+            count: usize,
+        }
+
+        #[test]
+        fn template_reflect_attribute_generates_reflect_template() {
+            let mut registry = TypeRegistry::empty();
+            registry.register::<FooTemplate>();
+
+            let data = registry
+                .get_type_data::<ReflectTemplate>(TypeId::of::<FooTemplate>())
+                .unwrap();
+            assert_eq!(data.output_type_id, TypeId::of::<Foo>());
+        }
+
+        #[test]
+        fn generated_template_has_from_reflect() {
+            let mut registry = TypeRegistry::empty();
+            registry.register::<FooTemplate>();
+
+            assert!(registry
+                .get_type_data::<ReflectFromReflect>(TypeId::of::<FooTemplate>())
+                .is_some());
+            assert!(registry
+                .get_type_data::<ReflectDefault>(TypeId::of::<FooTemplate>())
+                .is_some());
+        }
+
+        #[test]
+        fn generated_template_round_trips_through_from_reflect() {
+            let mut registry = TypeRegistry::empty();
+            registry.register::<FooTemplate>();
+
+            let mut patch = DynamicStruct::default();
+            patch.insert("count", 3usize);
+
+            let template =
+                try_from_reflect_with_fallback::<FooTemplate>(&patch, &registry).unwrap();
+            assert_eq!(template.count, 3);
+            assert_eq!(template.other, 0);
+        }
+
+        #[test]
+        fn template_reflect_attribute_is_opt_in() {
+            // Compile-level assertion: `NotReflectedTemplate` exists and is usable without being
+            // `Reflect`.
+            let template = NotReflectedTemplate { count: 7 };
+            assert_eq!(template.count, 7);
+        }
+
+        #[test]
+        fn entity_template_is_reflect() {
+            let mut registry = TypeRegistry::empty();
+            registry.register::<EntityTemplate>();
+
+            assert!(registry
+                .get_type_data::<ReflectDefault>(TypeId::of::<EntityTemplate>())
+                .is_some());
+            let data = registry
+                .get_type_data::<ReflectTemplate>(TypeId::of::<EntityTemplate>())
+                .unwrap();
+            assert_eq!(data.output_type_id, TypeId::of::<Entity>());
+        }
+
+        #[test]
+        fn scene_entity_reference_is_opaque() {
+            let reference = SceneEntityReference::new(("file.rs", 1, 2), 3, 4);
+            assert!(matches!(reference.reflect_ref(), ReflectRef::Opaque(_)));
+            let cloned = reference.reflect_clone().unwrap();
+            assert_eq!(
+                *cloned.downcast::<SceneEntityReference>().unwrap(),
+                reference
+            );
+        }
+
+        #[test]
+        fn option_and_vec_templates_are_reflect() {
+            let mut registry = TypeRegistry::empty();
+            registry.register::<OptionTemplate<u32>>();
+            registry.register::<VecTemplate<u32>>();
+
+            assert!(registry.get(TypeId::of::<OptionTemplate<u32>>()).is_some());
+            assert!(registry.get(TypeId::of::<VecTemplate<u32>>()).is_some());
+            assert!(OptionTemplate::<u32>::None
+                .get_represented_type_info()
+                .is_some());
+            assert!(VecTemplate::<u32>::default()
+                .get_represented_type_info()
+                .is_some());
+        }
+    }
 
     #[test]
     fn option_template() {

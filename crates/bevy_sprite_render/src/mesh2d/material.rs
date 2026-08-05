@@ -211,7 +211,8 @@ pub trait Material2d: AsBindGroup + Asset + Clone + Sized {
 ///
 /// [`MeshMaterial2d`]: crate::MeshMaterial2d
 #[derive(Component, FromTemplate, Clone, Debug, Deref, DerefMut, Reflect, From)]
-#[reflect(Component, Default, Clone)]
+#[reflect(Component, Default, Clone, FromTemplate)]
+#[template(reflect)]
 pub struct MeshMaterial2d<M: Material2d>(pub Handle<M>);
 
 impl<M: Material2d> Default for MeshMaterial2d<M> {
@@ -337,6 +338,9 @@ where
         app.init_asset::<M>()
             .init_resource::<EntitiesNeedingSpecialization<M>>()
             .register_type::<MeshMaterial2d<M>>()
+            // Generic types are never auto-registered for reflection, so the generated template
+            // needs an explicit registration for reflection-driven scene formats to find it.
+            .register_type::<MeshMaterial2dTemplate<M>>()
             .add_plugins(ErasedRenderAssetPlugin::<MeshMaterial2d<M>>::default())
             .add_systems(
                 PostUpdate,
@@ -1406,4 +1410,35 @@ where
     add_shader(Material2dFragmentShader.intern(), M::fragment_shader());
 
     shaders
+}
+
+#[cfg(test)]
+mod template_reflect_tests {
+    use super::*;
+    use bevy_ecs::reflect::{ReflectFromTemplate, ReflectTemplate};
+    use bevy_reflect::{std_traits::ReflectDefault, TypeRegistry};
+    use core::any::TypeId;
+
+    /// Walks the exact lookup chain a reflection-driven scene format performs: component type →
+    /// [`ReflectFromTemplate`] → template registration → [`ReflectTemplate`] + `ReflectDefault`.
+    fn assert_template_chain<C: bevy_reflect::GetTypeRegistration + 'static>(
+        registry: &TypeRegistry,
+    ) {
+        let from_template = registry
+            .get_type_data::<ReflectFromTemplate>(TypeId::of::<C>())
+            .expect("component should carry `ReflectFromTemplate`");
+        let template = registry
+            .get(from_template.template_type_id)
+            .unwrap_or_else(|| panic!("`{}` is not registered", from_template.template_type_path));
+        assert!(template.data::<ReflectTemplate>().is_some());
+        assert!(template.data::<ReflectDefault>().is_some());
+    }
+
+    #[test]
+    fn template_type_registered_for_seed_set() {
+        let mut registry = TypeRegistry::empty();
+        registry.register::<MeshMaterial2d<crate::ColorMaterial>>();
+        registry.register::<MeshMaterial2dTemplate<crate::ColorMaterial>>();
+        assert_template_chain::<MeshMaterial2d<crate::ColorMaterial>>(&registry);
+    }
 }

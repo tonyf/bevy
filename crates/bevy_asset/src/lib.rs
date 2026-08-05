@@ -216,7 +216,7 @@ use alloc::{
 use bevy_app::{App, Plugin, PostUpdate, PreUpdate};
 use bevy_ecs::{prelude::Component, schedule::common_conditions::resource_exists};
 use bevy_ecs::{
-    reflect::AppTypeRegistry,
+    reflect::{AppTypeRegistry, ReflectFromTemplate, ReflectTemplate},
     schedule::{IntoScheduleConfigs, SystemSet},
     world::FromWorld,
 };
@@ -700,6 +700,8 @@ impl AssetApp for App {
             type_registry.register::<HandleTemplate<A>>();
             type_registry.register_type_data::<A, ReflectAsset>();
             type_registry.register_type_data::<Handle<A>, ReflectHandle>();
+            type_registry.register_type_data::<Handle<A>, ReflectFromTemplate>();
+            type_registry.register_type_data::<HandleTemplate<A>, ReflectTemplate>();
             type_registry
                 .register_type_conversion::<String, HandleTemplate<A>, _>(|s| Ok(s.into()));
         }
@@ -1020,6 +1022,30 @@ mod tests {
             sub_texts: vec![],
         };
         ron::ser::to_string_pretty(&cool_text_ron, PrettyConfig::new().new_line("\n")).unwrap()
+    }
+
+    #[test]
+    fn handle_template_type_data_registered() {
+        use crate::{handle::HandleTemplate, AssetApp as _};
+        use bevy_ecs::reflect::{AppTypeRegistry, ReflectFromTemplate, ReflectTemplate};
+
+        let (mut app, _dir) = create_app();
+        app.init_asset::<CoolText>()
+            .register_asset_reflect::<CoolText>();
+
+        let type_registry = app.world().resource::<AppTypeRegistry>().clone();
+        let type_registry = type_registry.read();
+
+        let from_template = type_registry
+            .get_type_data::<ReflectFromTemplate>(TypeId::of::<Handle<CoolText>>())
+            .unwrap();
+        assert_eq!(
+            from_template.template_type_id,
+            TypeId::of::<HandleTemplate<CoolText>>()
+        );
+        assert!(type_registry
+            .get_type_data::<ReflectTemplate>(TypeId::of::<HandleTemplate<CoolText>>())
+            .is_some());
     }
 
     #[test]
