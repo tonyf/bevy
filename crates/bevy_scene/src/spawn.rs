@@ -183,24 +183,44 @@ pub trait WorldSceneExt {
     fn queue_spawn_scene_list<L: SceneList>(&mut self, scenes: L);
 }
 
+/// Loads `scene` and resolves it immediately, against the world's [`AppTypeRegistry`] if it has one.
+///
+/// Returning the patch by value is what bounds the registry read guard: it is dropped before the
+/// caller can take the `&mut World` it needs to spawn. A [`Scene::resolve`] impl must not take a
+/// **write** lock on the registry while the guard is alive.
+fn load_and_resolve<S: Scene>(world: &World, scene: S) -> Result<ScenePatch, SpawnSceneError> {
+    let assets = world.resource::<AssetServer>();
+    let mut patch = ScenePatch::load(assets, scene);
+    let type_registry = world.get_resource::<AppTypeRegistry>();
+    let type_registry = type_registry.map(|registry| registry.read());
+    patch.resolve(
+        assets,
+        world.resource::<Assets<ScenePatch>>(),
+        type_registry.as_deref(),
+    )?;
+    Ok(patch)
+}
+
+/// [`load_and_resolve`] for a [`SceneList`].
+fn load_and_resolve_list<L: SceneList>(
+    world: &World,
+    scenes: L,
+) -> Result<SceneListPatch, SpawnSceneError> {
+    let assets = world.resource::<AssetServer>();
+    let mut patch = SceneListPatch::load(assets, scenes);
+    let type_registry = world.get_resource::<AppTypeRegistry>();
+    let type_registry = type_registry.map(|registry| registry.read());
+    patch.resolve(
+        assets,
+        world.resource::<Assets<ScenePatch>>(),
+        type_registry.as_deref(),
+    )?;
+    Ok(patch)
+}
+
 impl WorldSceneExt for World {
     fn spawn_scene<S: Scene>(&mut self, scene: S) -> Result<EntityWorldMut<'_>, SpawnSceneError> {
-        let patch = {
-            let assets = self.resource::<AssetServer>();
-            let mut patch = ScenePatch::load(assets, scene);
-            // The read guard is held only for the duration of `resolve`; `patch.spawn` below needs
-            // `&mut World`. A `Scene::resolve` impl must not take a write lock on the registry
-            // while this guard is alive.
-            let type_registry = self.get_resource::<AppTypeRegistry>();
-            let type_registry = type_registry.map(|registry| registry.read());
-            patch.resolve(
-                assets,
-                self.resource::<Assets<ScenePatch>>(),
-                type_registry.as_deref(),
-            )?;
-            patch
-        };
-        patch.spawn(self)
+        load_and_resolve(self, scene)?.spawn(self)
     }
 
     fn queue_spawn_scene<S: Scene>(&mut self, scene: S) -> EntityWorldMut<'_> {
@@ -217,22 +237,7 @@ impl WorldSceneExt for World {
         &mut self,
         scenes: L,
     ) -> Result<Vec<Entity>, SpawnSceneError> {
-        let patch = {
-            let assets = self.resource::<AssetServer>();
-            let mut patch = SceneListPatch::load(assets, scenes);
-            // The read guard is held only for the duration of `resolve`; `patch.spawn` below needs
-            // `&mut World`. A `Scene::resolve` impl must not take a write lock on the registry
-            // while this guard is alive.
-            let type_registry = self.get_resource::<AppTypeRegistry>();
-            let type_registry = type_registry.map(|registry| registry.read());
-            patch.resolve(
-                assets,
-                self.resource::<Assets<ScenePatch>>(),
-                type_registry.as_deref(),
-            )?;
-            patch
-        };
-        patch.spawn(self)
+        load_and_resolve_list(self, scenes)?.spawn(self)
     }
 
     fn queue_spawn_scene_list<L: SceneList>(&mut self, scenes: L) {
@@ -518,22 +523,7 @@ impl EntityWorldMutSceneExt for EntityWorldMut<'_> {
     }
 
     fn apply_scene<S: Scene>(&mut self, scene: S) -> Result<(), SpawnSceneError> {
-        let patch = {
-            let assets = self.resource::<AssetServer>();
-            let mut patch = ScenePatch::load(assets, scene);
-            // The read guard is held only for the duration of `resolve`; `patch.apply` below needs
-            // `&mut EntityWorldMut`. A `Scene::resolve` impl must not take a write lock on the
-            // registry while this guard is alive.
-            let type_registry = self.get_resource::<AppTypeRegistry>();
-            let type_registry = type_registry.map(|registry| registry.read());
-            patch.resolve(
-                assets,
-                self.resource::<Assets<ScenePatch>>(),
-                type_registry.as_deref(),
-            )?;
-            patch
-        };
-        patch.apply(self)
+        load_and_resolve(self.world(), scene)?.apply(self)
     }
 
     fn queue_apply_scene<S: Scene>(&mut self, scene: S) {

@@ -165,47 +165,6 @@ pub enum ResolveSceneError {
     /// Caused when a [`Scene`]/[`SceneList`] is not present on the scene asset.
     #[error("The Scene/SceneList is not present on the scene asset. This is likely because the scene has already been resolved, which consumed the source scene")]
     MissingScene,
-    /// Caused when a scene refers to a type that is not present in the [`TypeRegistry`].
-    #[error("The type `{type_path}` is not registered in the TypeRegistry. Register it with `app.register_type::<{type_path}>()`.")]
-    TypeNotRegistered {
-        /// The type path that could not be found.
-        type_path: String,
-    },
-    /// Caused when a registered type cannot be viewed as reflection data (e.g. it has no
-    /// [`ReflectFromPtr`] type data, which every `#[derive(Reflect)]` type registers).
-    ///
-    /// [`ReflectFromPtr`]: bevy_reflect::ReflectFromPtr
-    #[error("The type `{type_path}` cannot be accessed reflectively. It likely does not derive `Reflect`.")]
-    TypeNotReflectable {
-        /// The type path that is not reflectable.
-        type_path: String,
-    },
-    /// Caused when a template type has to be default-constructed reflectively but has no
-    /// [`ReflectDefault`] type data.
-    ///
-    /// [`ReflectDefault`]: bevy_reflect::std_traits::ReflectDefault
-    #[error("The template type `{type_path}` has no `ReflectDefault` type data, so it cannot be created from a scene asset. Add `#[reflect(Default)]` to it.")]
-    MissingReflectDefault {
-        /// The template type path that is missing `ReflectDefault`.
-        type_path: String,
-    },
-    /// Caused when a type used as a component patch has no [`ReflectComponent`] type data.
-    ///
-    /// [`ReflectComponent`]: bevy_ecs::reflect::ReflectComponent
-    #[error("The type `{type_path}` has no `ReflectComponent` type data, so it cannot be inserted as a component. Add `#[reflect(Component)]` to it.")]
-    MissingReflectComponent {
-        /// The type path that is missing `ReflectComponent`.
-        type_path: String,
-    },
-    /// Caused when a scene names a relationship target type that cannot be used for related
-    /// scenes (e.g. it has no [`ReflectRelationshipTarget`] type data).
-    ///
-    /// [`ReflectRelationshipTarget`]: bevy_ecs::reflect::ReflectRelationshipTarget
-    #[error("`{type_path}` cannot be used as a relationship in a scene. It must be a `RelationshipTarget` registered with `#[reflect(RelationshipTarget)]`.")]
-    UnsupportedRelationship {
-        /// The type path of the unsupported relationship target.
-        type_path: String,
-    },
     /// Caused when reflectively applying patched fields onto a template value fails.
     #[error("Failed to apply a scene patch to `{type_path}`: {error}")]
     ApplyFailed {

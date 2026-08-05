@@ -67,6 +67,13 @@ pub struct BsnParseError {
 }
 
 impl BsnParseError {
+    /// The rendered `expected …` suffix for this error, or an empty string when the parser
+    /// recorded no expectations. Begins with a leading space, so it can be appended directly
+    /// to the [`Display`](core::fmt::Display) output when composing one-line diagnostics.
+    pub fn expected_suffix(&self) -> String {
+        render_expected(&self.expected)
+    }
+
     /// Creates an error with no "expected" list.
     pub fn new(span: Span, kind: BsnParseErrorKind) -> Self {
         BsnParseError {
@@ -101,17 +108,14 @@ impl BsnParseError {
 
         let (line, column) = self.span.line_col(source);
         let line_text = source.lines().nth(line as usize - 1).unwrap_or("");
-        let truncated: String = if line_text.chars().count() > MAX_LINE {
-            let mut text: String = line_text.chars().take(MAX_LINE).collect();
-            text.push_str("...");
-            text
-        } else {
-            line_text.to_string()
-        };
-        let display_line: String = truncated
+        let mut display_line: String = line_text
             .chars()
+            .take(MAX_LINE)
             .map(|c| if c == '\t' { ' ' } else { c })
             .collect();
+        if line_text.chars().nth(MAX_LINE).is_some() {
+            display_line.push_str("...");
+        }
 
         let number = line.to_string();
         let gutter = " ".repeat(number.len() + 1);

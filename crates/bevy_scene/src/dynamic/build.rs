@@ -192,14 +192,6 @@ pub enum DynamicSceneBuildError {
         /// Where the entry was written.
         span: Span,
     },
-    /// A value form has no reflection encoding for the destination type.
-    #[error("A `{kind}` value cannot be used here.")]
-    UnsupportedValueKind {
-        /// The kind of value.
-        kind: &'static str,
-        /// Where the value was written.
-        span: Span,
-    },
     /// A `#Name` reference names an entity the document does not declare.
     #[error("No entity in this document is named `#{name}`.")]
     UnknownEntityName {
@@ -217,7 +209,10 @@ pub enum DynamicSceneBuildError {
         span: Span,
     },
     /// The document describes more than one root entity.
-    #[error("A scene asset must describe exactly one root entity, but this document has {count}.")]
+    #[error(
+        "a scene asset must contain exactly one root entity, found {count}. Wrap them in a \
+         single root, or split them into separate files."
+    )]
     MultipleRoots {
         /// How many roots the document has.
         count: usize,
@@ -255,7 +250,6 @@ impl DynamicSceneBuildError {
             | Self::ValueApplyFailed { span, .. }
             | Self::UnsupportedRelationship { span, .. }
             | Self::SceneComponentUnsupported { span, .. }
-            | Self::UnsupportedValueKind { span, .. }
             | Self::UnknownEntityName { span, .. }
             | Self::InvalidAssetPath { span, .. }
             | Self::MultipleRoots { span, .. }
@@ -301,6 +295,10 @@ impl<'a> BuildCx<'a> {
     }
 
     /// Enters one level of recursion, failing if the document nests too deeply.
+    ///
+    /// Callers pair this with [`BuildCx::exit`] on the **success** path only: depth is only
+    /// meaningful on the success path; any error aborts the whole build, so an unbalanced
+    /// `enter` on an error path is never observed.
     pub(crate) fn enter(&mut self, span: Span) -> Result<(), DynamicSceneBuildError> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
@@ -355,7 +353,7 @@ impl DynamicScene {
         registry: &AppTypeRegistry,
     ) -> Result<Self, DynamicSceneBuildError> {
         let source: Arc<str> = source.into();
-        let root = {
+        let (root, dependencies) = {
             let guard = registry.read();
             let mut cx = BuildCx::new(&guard, document, &source);
 
@@ -377,25 +375,16 @@ impl DynamicScene {
                 }
             };
 
-            RootBuild {
-                root,
-                dependencies: cx.dependencies,
-            }
+            (root, cx.dependencies)
         };
 
         Ok(DynamicScene(Arc::new(DynamicSceneInner {
-            root: root.root,
-            dependencies: root.dependencies,
+            root,
+            dependencies,
             source,
             type_registry: registry.clone(),
         })))
     }
-}
-
-/// The result of walking the document, before it is sealed into a [`DynamicSceneInner`].
-struct RootBuild {
-    root: DynamicSceneEntity,
-    dependencies: Vec<(TypeId, AssetPath<'static>)>,
 }
 
 /// Maps every `#Name` in the document to the node id of the entity that declares it.
@@ -437,59 +426,54 @@ fn build_entity(
         ..
     } = &node.kind
     else {
-        cx.exit();
         return Err(malformed(
             format!("node {} is not an entity", node_id.0),
             span,
         ));
     };
 
-    let result = (|| {
-        let base = match base {
-            Some(base) => {
-                let span = base_span.unwrap_or(span);
-                let path = AssetPath::try_parse(base)
-                    .map_err(|_| DynamicSceneBuildError::InvalidAssetPath {
-                        path: base.clone(),
-                        span,
-                    })?
-                    .into_owned();
-                // The root's base is registered directly by `Scene::register_dependencies`; nested
-                // ones have to be flattened into the shared list.
-                if !is_root {
-                    cx.dependencies
-                        .push((TypeId::of::<ScenePatch>(), path.clone()));
-                }
-                Some(path)
+    let base = match base {
+        Some(base) => {
+            let span = base_span.unwrap_or(span);
+            let path = AssetPath::try_parse(base)
+                .map_err(|_| DynamicSceneBuildError::InvalidAssetPath {
+                    path: base.clone(),
+                    span,
+                })?
+                .into_owned();
+            // The root's base is registered directly by `Scene::register_dependencies`; nested
+            // ones have to be flattened into the shared list.
+            if !is_root {
+                cx.dependencies
+                    .push((TypeId::of::<ScenePatch>(), path.clone()));
             }
-            None => None,
-        };
-
-        let name = name.as_ref().map(|name| DynamicName {
-            name: Name::new(name.clone()),
-            reference: SceneEntityReference::from_asset_hashed(cx.source_path_hash, node_id.0),
-        });
-
-        let mut built_patches = Vec::with_capacity(patches.len());
-        for patch in patches {
-            built_patches.push(build_patch(cx, *patch)?);
+            Some(path)
         }
+        None => None,
+    };
 
-        let mut built_relations = Vec::with_capacity(relations.len());
-        for relation in relations {
-            built_relations.push(build_relation(cx, *relation)?);
-        }
+    let name = name.as_ref().map(|name| DynamicName {
+        name: Name::new(name.clone()),
+        reference: SceneEntityReference::from_asset_hashed(cx.source_path_hash, node_id.0),
+    });
 
-        Ok(DynamicSceneEntity {
-            base,
-            name,
-            patches: built_patches,
-            relations: built_relations,
-        })
-    })();
+    let mut built_patches = Vec::with_capacity(patches.len());
+    for patch in patches {
+        built_patches.push(build_patch(cx, *patch)?);
+    }
+
+    let mut built_relations = Vec::with_capacity(relations.len());
+    for relation in relations {
+        built_relations.push(build_relation(cx, *relation)?);
+    }
 
     cx.exit();
-    result
+    Ok(DynamicSceneEntity {
+        base,
+        name,
+        patches: built_patches,
+        relations: built_relations,
+    })
 }
 
 /// Builds one `Children [ … ]`-style relation block.
@@ -563,7 +547,7 @@ fn build_patch(
     let named = resolve_symbol(cx.registry, symbol, span)?;
     let (template, output) = template_registration(cx.registry, named.registration, *prefix, span)?;
 
-    let template_type_path: Arc<str> = Arc::from(template.type_info().type_path());
+    let template_type_path = template.type_info().type_path();
     let reflect_default = template.data::<ReflectDefault>().cloned().ok_or_else(|| {
         DynamicSceneBuildError::MissingReflectDefault {
             type_path: template_type_path.to_string(),
@@ -608,7 +592,7 @@ fn build_patch(
             let (full, partial) =
                 value::build_enum_forms(cx, template, variant, input, value_span)?;
             DynamicPatchValue::EnumVariant {
-                variant: Arc::from(variant),
+                variant,
                 full,
                 partial,
             }

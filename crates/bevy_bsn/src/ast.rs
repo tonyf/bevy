@@ -2,6 +2,7 @@
 //! stable [`BsnNodeId`]s and [`BsnValueId`]s.
 
 use alloc::{
+    format,
     string::{String, ToString},
     vec::Vec,
 };
@@ -550,14 +551,12 @@ impl BsnDocument {
                 relations,
                 ..
             } => {
-                let name = match name {
-                    Some(name) => escape_string(name),
-                    None => "-".to_string(),
-                };
-                let base = match base {
-                    Some(base) => escape_string(base),
-                    None => "-".to_string(),
-                };
+                let name = name
+                    .as_deref()
+                    .map_or_else(|| "-".to_string(), escape_string);
+                let base = base
+                    .as_deref()
+                    .map_or_else(|| "-".to_string(), escape_string);
                 let _ = writeln!(out, "{pad}Entity#{} name={name} base={base}", node.id.0);
                 for entry in merge_entries(self, patches, relations) {
                     self.debug_node(entry, indent + 2, out);
@@ -603,56 +602,16 @@ impl BsnDocument {
 fn debug_value_head(value: &BsnValue) -> String {
     match value {
         BsnValue::Unit => "Unit".to_string(),
-        BsnValue::Bool(value) => {
-            let mut out = String::from("Bool(");
-            out.push_str(if *value { "true" } else { "false" });
-            out.push(')');
-            out
-        }
-        BsnValue::Int(value) => {
-            let mut out = String::from("Int(");
-            let _ = write!(out, "{value}");
-            out.push(')');
-            out
-        }
-        BsnValue::Float(value) => {
-            let mut out = String::from("Float(");
-            out.push_str(&crate::printer::format_float(*value));
-            out.push(')');
-            out
-        }
-        BsnValue::String(value) => {
-            let mut out = String::from("Str(");
-            out.push_str(&escape_string(value));
-            out.push(')');
-            out
-        }
-        BsnValue::Path(path) => {
-            let mut out = String::from("Path(");
-            out.push_str(&path.to_type_path());
-            out.push(')');
-            out
-        }
-        BsnValue::EntityRef(name) => {
-            let mut out = String::from("EntityRef(");
-            out.push_str(name);
-            out.push(')');
-            out
-        }
+        BsnValue::Bool(value) => format!("Bool({value})"),
+        BsnValue::Int(value) => format!("Int({value})"),
+        BsnValue::Float(value) => format!("Float({})", crate::printer::format_float(*value)),
+        BsnValue::String(value) => format!("Str({})", escape_string(value)),
+        BsnValue::Path(path) => format!("Path({})", path.to_type_path()),
+        BsnValue::EntityRef(name) => format!("EntityRef({name})"),
         BsnValue::Tuple(_) => "Tuple".to_string(),
         BsnValue::List(_) => "List".to_string(),
-        BsnValue::Struct(path, _) => {
-            let mut out = String::from("Struct(");
-            out.push_str(&path.to_type_path());
-            out.push(')');
-            out
-        }
-        BsnValue::NamedTuple(path, _) => {
-            let mut out = String::from("NamedTuple(");
-            out.push_str(&path.to_type_path());
-            out.push(')');
-            out
-        }
+        BsnValue::Struct(path, _) => format!("Struct({})", path.to_type_path()),
+        BsnValue::NamedTuple(path, _) => format!("NamedTuple({})", path.to_type_path()),
     }
 }
 

@@ -37,12 +37,6 @@ impl core::fmt::Debug for DynamicScene {
 }
 
 impl DynamicScene {
-    /// The asset path this scene was built from. Used for error messages and for the identity of
-    /// its `#Name` entity references.
-    pub fn source(&self) -> &str {
-        &self.0.source
-    }
-
     /// Every asset dependency discovered while building this scene, flattened over the whole
     /// document: `(asset type id, path)` pairs, plus one entry per nested `:"base.bsn"` include.
     ///
@@ -104,7 +98,7 @@ pub(crate) struct DynamicPatch {
     /// dynamic and `bsn!` patches of the same component merge.
     pub(crate) template_type_id: TypeId,
     /// Type path of the template type. Errors only.
-    pub(crate) template_type_path: Arc<str>,
+    pub(crate) template_type_path: &'static str,
 
     /// Constructs a fresh template value. From the template type's registration.
     pub(crate) reflect_default: ReflectDefault,
@@ -128,7 +122,7 @@ pub(crate) enum DynamicPatchValue {
     /// `Foo::Bar { x: 1 }` / `Foo::Qux`: "match-or-reset", mirroring what the `bsn!` macro emits.
     EnumVariant {
         /// The target variant's name.
-        variant: Arc<str>,
+        variant: &'static str,
         /// Every non-ignored field of the variant defaulted, then the supplied fields overlaid.
         /// Applied when the current variant *differs*, because a reflect variant switch requires a
         /// complete field set.
@@ -222,36 +216,31 @@ fn resolve_patch(
     context: &mut ResolveContext,
     scene: &mut ResolvedScene,
 ) -> Result<(), ResolveSceneError> {
-    let template_type_id = patch.template_type_id;
-    let reflect_default = patch.reflect_default.clone();
-    let reflect_component = patch.reflect_component.clone();
-    let reflect_template = patch.reflect_template.clone();
-    let reflect_from_reflect = patch.reflect_from_reflect.clone();
-    let type_registry = registry.clone();
-
-    let erased = scene.get_or_insert_erased_template(context, template_type_id, move || {
-        let value = reflect_default.default();
+    // The type data is only cloned when the slot has to be created: `default` is an `FnOnce` that
+    // borrows `patch` and `registry`, both disjoint from the `&mut` borrows of `scene`/`context`.
+    let erased = scene.get_or_insert_erased_template(context, patch.template_type_id, || {
         Box::new(DynamicComponentTemplate::new(
-            template_type_id,
-            value,
-            reflect_component,
-            reflect_template,
-            reflect_default,
-            reflect_from_reflect,
-            type_registry,
+            patch.template_type_id,
+            patch.reflect_default.default(),
+            patch.reflect_component.clone(),
+            patch.reflect_template.clone(),
+            patch.reflect_default.clone(),
+            patch.reflect_from_reflect.clone(),
+            registry.clone(),
         ))
     });
 
     // Prefer the registry the resolve entry point already read-locked: taking a second read lock
     // on the same registry from inside `Scene::resolve` risks deadlocking against a queued writer.
-    let value = match context.type_registry {
-        Some(type_registry) => erased_template_as_partial_reflect_mut(erased, type_registry),
+    let guard;
+    let type_registry = match context.type_registry {
+        Some(type_registry) => type_registry,
         None => {
-            let guard = registry.read();
-            erased_template_as_partial_reflect_mut(erased, &guard)
+            guard = registry.read();
+            &guard
         }
     };
-    let Some(value) = value else {
+    let Some(value) = erased_template_as_partial_reflect_mut(erased, type_registry) else {
         return Err(ResolveSceneError::UnpatchableTemplate {
             type_path: patch.template_type_path.to_string(),
         });
@@ -275,7 +264,7 @@ fn resolve_patch(
             // The reflection equivalent of the macro's `if !matches!(node, T::V { .. }) { *node =
             // T::default_v(); }` followed by the field assignments.
             let matches_variant = match value.reflect_ref() {
-                ReflectRef::Enum(current) => current.variant_name() == &**variant,
+                ReflectRef::Enum(current) => current.variant_name() == *variant,
                 _ => false,
             };
             let source = if matches_variant { partial } else { full };

@@ -28,9 +28,10 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct ReflectRelationshipTarget {
     /// `TypeId::of::<<T as RelationshipTarget>::Relationship>()` — e.g. `ChildOf`.
+    ///
+    /// The *target*'s own [`TypeId`] is deliberately not stored: it is the id this type data is
+    /// registered under, so every consumer already has it.
     pub relationship_type_id: TypeId,
-    /// `TypeId::of::<T>()` — e.g. `Children`.
-    pub relationship_target_type_id: TypeId,
     /// `core::any::type_name::<<T as RelationshipTarget>::Relationship>()`, for error messages.
     pub relationship_name: &'static str,
     /// Pushes `Relationship::from(target)` into a [`BundleWriter`].
@@ -53,7 +54,6 @@ impl<T: RelationshipTarget + Reflect + TypePath> CreateTypeData<T> for ReflectRe
     fn create_type_data(_input: ()) -> Self {
         ReflectRelationshipTarget {
             relationship_type_id: TypeId::of::<T::Relationship>(),
-            relationship_target_type_id: TypeId::of::<T>(),
             relationship_name: core::any::type_name::<T::Relationship>(),
             insert_relationship: |bundle_writer, components_registrator, target| {
                 let relationship = <T::Relationship as Relationship>::from(target);
@@ -98,7 +98,6 @@ mod tests {
             .get_type_data::<ReflectRelationshipTarget>(TypeId::of::<Children>())
             .unwrap();
         assert_eq!(data.relationship_type_id, TypeId::of::<ChildOf>());
-        assert_eq!(data.relationship_target_type_id, TypeId::of::<Children>());
         assert_eq!(data.relationship_name, core::any::type_name::<ChildOf>());
     }
 
@@ -193,7 +192,6 @@ mod tests {
             .get_type_data::<ReflectRelationshipTarget>(TypeId::of::<LikedBy>())
             .unwrap();
         assert_eq!(data.relationship_type_id, TypeId::of::<Likes>());
-        assert_eq!(data.relationship_target_type_id, TypeId::of::<LikedBy>());
         assert_eq!(data.relationship_name, core::any::type_name::<Likes>());
     }
 }

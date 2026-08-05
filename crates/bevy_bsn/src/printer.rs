@@ -14,6 +14,7 @@
 //!   non-canonical `NaN` *payload* does not, and comes back as the platform's quiet `NaN`.
 
 use alloc::{
+    format,
     string::{String, ToString},
     vec::Vec,
 };
@@ -158,9 +159,7 @@ pub(crate) fn format_float(value: f64) -> String {
     } else if value == f64::NEG_INFINITY {
         "-inf".to_string()
     } else {
-        let mut out = String::new();
-        let _ = write!(out, "{value:?}");
-        out
+        format!("{value:?}")
     }
 }
 
@@ -252,8 +251,20 @@ impl Printer<'_> {
         }
         for entry in merge_entries(document, patches, relations) {
             match document.node(entry).map(|node| &node.kind) {
-                Some(BsnNodeKind::Patch { .. }) => self.patch(out, entry, level),
-                Some(BsnNodeKind::Relation { .. }) => self.relation(out, entry, level),
+                Some(BsnNodeKind::Patch { prefix, value, .. }) => {
+                    let (prefix, value) = (*prefix, *value);
+                    out.push_str(&pad);
+                    out.push_str(prefix.sigil());
+                    self.value(out, value, level, 0);
+                    out.push('\n');
+                }
+                Some(BsnNodeKind::Relation {
+                    target_symbol,
+                    entities,
+                }) => {
+                    let (path, entities) = (target_symbol.to_type_path(), entities.clone());
+                    self.relation(out, &path, &entities, level);
+                }
                 _ => {
                     let _ = writeln!(out, "{pad}{INVALID}{}> */", entry.0);
                 }
@@ -265,39 +276,9 @@ impl Printer<'_> {
         self.node_stack.pop();
     }
 
-    fn patch(&mut self, out: &mut String, id: BsnNodeId, level: usize) {
+    /// Appends a relation entry: its type path, then each child entity one level in.
+    fn relation(&mut self, out: &mut String, path: &str, entities: &[BsnNodeId], level: usize) {
         let pad = self.indent(level);
-        let Some(node) = self.document.node(id) else {
-            let _ = writeln!(out, "{pad}{INVALID}{}> */", id.0);
-            return;
-        };
-        let BsnNodeKind::Patch { prefix, value, .. } = &node.kind else {
-            let _ = writeln!(out, "{pad}{INVALID}{}> */", id.0);
-            return;
-        };
-        let (prefix, value) = (*prefix, *value);
-        out.push_str(&pad);
-        out.push_str(prefix.sigil());
-        self.value(out, value, level, 0);
-        out.push('\n');
-    }
-
-    fn relation(&mut self, out: &mut String, id: BsnNodeId, level: usize) {
-        let pad = self.indent(level);
-        let Some(node) = self.document.node(id) else {
-            let _ = writeln!(out, "{pad}{INVALID}{}> */", id.0);
-            return;
-        };
-        let BsnNodeKind::Relation {
-            target_symbol,
-            entities,
-        } = &node.kind
-        else {
-            let _ = writeln!(out, "{pad}{INVALID}{}> */", id.0);
-            return;
-        };
-        let path = target_symbol.to_type_path();
-        let entities = entities.clone();
         if entities.is_empty() {
             let _ = writeln!(out, "{pad}{path} []");
             return;
@@ -364,12 +345,13 @@ impl Printer<'_> {
             BsnValue::List(items) if !items.is_empty() => {
                 self.multiline_items(out, items, level, depth, "[", "]");
             }
-            _ => match inline {
-                Some(text) => out.push_str(&text),
-                None => {
-                    let _ = write!(out, "{INVALID}{}> */", id.0);
+            // Every remaining value is a leaf or an empty body, which `inline_value` always
+            // renders: the dangling-id, depth and cycle cases were all handled above.
+            _ => {
+                if let Some(text) = inline {
+                    out.push_str(&text);
                 }
-            },
+            }
         }
         self.value_stack.pop();
     }
@@ -422,69 +404,32 @@ impl Printer<'_> {
     fn inline_value_inner(&mut self, node: &BsnValueNode, depth: u32) -> Option<String> {
         Some(match &node.value {
             BsnValue::Unit => "()".to_string(),
-            BsnValue::Bool(true) => "true".to_string(),
-            BsnValue::Bool(false) => "false".to_string(),
-            BsnValue::Int(value) => {
-                let mut out = String::new();
-                let _ = write!(out, "{value}");
-                out
-            }
+            BsnValue::Bool(value) => value.to_string(),
+            BsnValue::Int(value) => value.to_string(),
             BsnValue::Float(value) => format_float(*value),
             BsnValue::String(value) => escape_string(value),
-            BsnValue::EntityRef(name) => {
-                let mut out = String::from("#");
-                out.push_str(name);
-                out
-            }
+            BsnValue::EntityRef(name) => format!("#{name}"),
             BsnValue::Path(path) => path.to_type_path(),
-            BsnValue::Tuple(values) => {
-                let parts = self.inline_items(values, depth)?;
-                if parts.is_empty() {
-                    "()".to_string()
-                } else if parts.len() == 1 {
-                    let mut out = String::from("(");
-                    out.push_str(&parts[0]);
-                    out.push_str(",)");
-                    out
-                } else {
-                    let mut out = String::from("(");
-                    out.push_str(&parts.join(", "));
-                    out.push(')');
-                    out
-                }
-            }
-            BsnValue::List(values) => {
-                let parts = self.inline_items(values, depth)?;
-                let mut out = String::from("[");
-                out.push_str(&parts.join(", "));
-                out.push(']');
-                out
-            }
-            BsnValue::NamedTuple(path, values) => {
-                let parts = self.inline_items(values, depth)?;
-                let mut out = path.to_type_path();
-                out.push('(');
-                out.push_str(&parts.join(", "));
-                out.push(')');
-                out
+            BsnValue::Tuple(values) => match self.inline_items(values, depth)?.as_slice() {
+                [] => "()".to_string(),
+                [one] => format!("({one},)"),
+                parts => format!("({})", parts.join(", ")),
+            },
+            BsnValue::List(values) => format!("[{}]", self.inline_items(values, depth)?.join(", ")),
+            BsnValue::NamedTuple(path, values) => format!(
+                "{}({})",
+                path.to_type_path(),
+                self.inline_items(values, depth)?.join(", ")
+            ),
+            BsnValue::Struct(path, fields) if fields.is_empty() => {
+                format!("{} {{}}", path.to_type_path())
             }
             BsnValue::Struct(path, fields) => {
-                let mut out = path.to_type_path();
-                if fields.is_empty() {
-                    out.push_str(" {}");
-                    return Some(out);
+                let mut parts = Vec::with_capacity(fields.len());
+                for (name, field) in fields {
+                    parts.push(format!("{name}: {}", self.inline_value(*field, depth + 1)?));
                 }
-                out.push_str(" { ");
-                for (index, (name, field)) in fields.iter().enumerate() {
-                    if index > 0 {
-                        out.push_str(", ");
-                    }
-                    out.push_str(name);
-                    out.push_str(": ");
-                    out.push_str(&self.inline_value(*field, depth + 1)?);
-                }
-                out.push_str(" }");
-                out
+                format!("{} {{ {} }}", path.to_type_path(), parts.join(", "))
             }
         })
     }

@@ -9,7 +9,6 @@ use alloc::{
     string::{String, ToString},
     vec::Vec,
 };
-use core::fmt::Write as _;
 
 use bevy_asset::{io::Reader, AssetLoadFailedEvent, AssetLoader, AssetPath, LoadContext};
 use bevy_bsn::{BsnDocument, BsnNodeKind, BsnParseError};
@@ -107,8 +106,9 @@ impl AssetLoader for DynamicBsnLoader {
             }
         })?;
 
-        // (4) Document-level checks the builder cannot make, because it does not know our path.
-        check_single_root(&document, source, &path)?;
+        // (4) The one document-level check the builder cannot make, because it does not know our
+        //     path. (The single-root rule *is* checked by the builder, which reports it with a
+        //     span that `from_build_error` turns into `path:line:column`.)
         check_no_self_include(&document, source, &path, load_context.path())?;
 
         // (5) Lower the document. `source` here is the asset path string: it gives the document's
@@ -128,44 +128,12 @@ impl AssetLoader for DynamicBsnLoader {
 
 /// Renders a [`BsnParseError`] as a single line, appending its "expected" list when it has one.
 fn parse_error_message(error: &BsnParseError) -> String {
-    let mut message = error.to_string();
-    match error.expected.as_slice() {
-        [] => {}
-        [one] => {
-            let _ = write!(message, "; expected {one}");
-        }
-        [one, two] => {
-            let _ = write!(message, "; expected {one} or {two}");
-        }
-        [rest @ .., last] => {
-            let _ = write!(message, "; expected {}, or {last}", rest.join(", "));
-        }
+    let suffix = error.expected_suffix();
+    if suffix.is_empty() {
+        error.to_string()
+    } else {
+        format!("{error};{suffix}")
     }
-    message
-}
-
-/// v1 restriction: one `.bsn` file describes exactly one root entity.
-///
-/// The builder rejects multi-root documents too, but only the loader knows this is an *asset*, so
-/// it produces the message that tells the user how to fix their file.
-fn check_single_root(
-    document: &BsnDocument,
-    source: &str,
-    path: &str,
-) -> Result<(), DynamicBsnLoaderError> {
-    if document.roots.len() > 1 {
-        let span = document
-            .node(document.roots[1])
-            .map_or(bevy_bsn::Span::NONE, |node| node.span);
-        let (line, column) = span.line_col(source);
-        return Err(DynamicBsnLoaderError::MultipleRoots {
-            path: path.to_string(),
-            line,
-            column,
-            count: document.roots.len(),
-        });
-    }
-    Ok(())
 }
 
 /// Rejects `a.bsn` whose base is `a.bsn`.
@@ -304,22 +272,6 @@ pub enum DynamicBsnLoaderError {
         source: DynamicSceneBuildError,
     },
 
-    /// The document has more than one root entity (not supported in this release).
-    #[error(
-        "{path}:{line}:{column}: a `.bsn` file must contain exactly one root entity, found \
-         {count}. Wrap them in a single root, or split them into separate files."
-    )]
-    MultipleRoots {
-        /// The asset path that was being loaded.
-        path: String,
-        /// 1-based line of the second root entity.
-        line: u32,
-        /// 1-based, `char`-counted column of the second root entity.
-        column: u32,
-        /// How many root entities the document has.
-        count: usize,
-    },
-
     /// The file inherits from itself (`a.bsn` containing `:"a.bsn"`).
     #[error(
         "{path}:{line}:{column}: this `.bsn` file inherits from itself. A scene cannot be its own \
@@ -420,20 +372,30 @@ mod tests {
         assert_eq!(error.to_string(), "scenes/x.bsn:12:5: expected `}`");
     }
 
+    /// Lowers `source` the way [`DynamicBsnLoader::load`] does, and wraps any build error with the
+    /// file it came from. An empty registry is enough: document-shape errors are reported before
+    /// any type is resolved.
+    fn load_errors(path: &'static str, source: &str) -> DynamicBsnLoaderError {
+        let document = bevy_bsn::parse(source).expect("the fixture should parse");
+        let error = DynamicScene::from_document(&document, path, &AppTypeRegistry::default())
+            .expect_err("the document should be rejected");
+        DynamicBsnLoaderError::from_build_error(path, source, error)
+    }
+
     #[test]
     fn multiple_roots_error_mentions_count() {
-        let error = DynamicBsnLoaderError::MultipleRoots {
-            path: "scenes/x.bsn".to_string(),
-            line: 4,
-            column: 1,
-            count: 3,
-        };
-        let message = error.to_string();
+        // Multi-root documents are rejected by the builder; the loader is what turns the span into
+        // a `path:line:column` prefix.
+        let message = load_errors("scenes/x.bsn", "(Foo),\n(Bar),\n(Baz)").to_string();
         assert!(
             message.contains("exactly one root entity"),
             "unexpected message: {message}"
         );
         assert!(message.contains("found 3"), "unexpected message: {message}");
+        assert!(
+            message.starts_with("scenes/x.bsn:2:"),
+            "the message should locate the second root: {message}"
+        );
     }
 
     #[test]
@@ -489,14 +451,31 @@ mod tests {
 
     #[test]
     fn single_root_check_accepts_one_root_and_rejects_two() {
-        let source = "Foo\n";
-        let document = bevy_bsn::parse(source).unwrap();
-        assert!(check_single_root(&document, source, "a.bsn").is_ok());
+        // A one-root document is never rejected *for its root count* (it still fails later here,
+        // on the unregistered `Foo`, because the fixture registry is empty).
+        let error = load_errors("a.bsn", "Foo\n");
+        assert!(
+            !matches!(
+                error,
+                DynamicBsnLoaderError::Build {
+                    source: DynamicSceneBuildError::MultipleRoots { .. },
+                    ..
+                }
+            ),
+            "a single-root document must not be rejected for its root count: {error}"
+        );
 
-        let source = "(Foo),\n(Bar)";
-        let document = bevy_bsn::parse(source).unwrap();
-        let error = check_single_root(&document, source, "a.bsn")
-            .expect_err("a two-root document must be rejected");
+        let error = load_errors("a.bsn", "(Foo),\n(Bar)");
+        assert!(
+            matches!(
+                error,
+                DynamicBsnLoaderError::Build {
+                    source: DynamicSceneBuildError::MultipleRoots { count: 2, .. },
+                    ..
+                }
+            ),
+            "a two-root document must be rejected: {error}"
+        );
         assert!(
             error.to_string().contains("exactly one root entity"),
             "unexpected message: {error}"

@@ -3419,22 +3419,9 @@ mod tests {
         #[test]
         fn resolve_scene_error_messages_name_the_type() {
             let type_path = || "my_crate::Foo".to_string();
+            // The remaining `ResolveSceneError` variants are all reported at *build* time by
+            // `DynamicSceneBuildError`, with a source span; see `dynamic::build`.
             let errors = [
-                ResolveSceneError::TypeNotRegistered {
-                    type_path: type_path(),
-                },
-                ResolveSceneError::TypeNotReflectable {
-                    type_path: type_path(),
-                },
-                ResolveSceneError::MissingReflectDefault {
-                    type_path: type_path(),
-                },
-                ResolveSceneError::MissingReflectComponent {
-                    type_path: type_path(),
-                },
-                ResolveSceneError::UnsupportedRelationship {
-                    type_path: type_path(),
-                },
                 ResolveSceneError::ApplyFailed {
                     type_path: type_path(),
                     error: ApplyError::MismatchedKinds {
@@ -3453,8 +3440,6 @@ mod tests {
                     "error message does not name the type: {error}"
                 );
             }
-
-            assert!(format!("{}", errors[2]).contains("#[reflect(Default)]"));
         }
 
         /// Pushes a related scene carrying a `Name` template through the generic API.

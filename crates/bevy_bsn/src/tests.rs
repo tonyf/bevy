@@ -687,9 +687,10 @@ fn structural_eq_compares_floats_by_bits() {
 
     let mut different = left.clone();
     different.values[0].value = BsnValue::Float(0.0);
+    assert!(!left.structural_eq(&different), "NaN must not equal 0.0");
+
     let mut negative_zero = left.clone();
     negative_zero.values[0].value = BsnValue::Float(-0.0);
-    different.values[0].value = BsnValue::Float(0.0);
     assert!(!different.structural_eq(&negative_zero), "0.0 != -0.0");
 }
 
@@ -1342,11 +1343,9 @@ error: Field shorthand (`{ name }`) is not supported in `.bsn` assets, because t
 ";
     assert_eq!(rendered, expected);
 
-    let source = "A\nB\nC { x: 1 }";
     let error = err("A\nB\nC { x }");
     let rendered = error.render("A\nB\nC { x }", None);
     assert!(rendered.contains("--> <bsn>:3:5"), "{rendered}");
-    assert!(source.contains("C {"));
 }
 
 // ---------------------------------------------------------------------------------------

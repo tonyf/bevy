@@ -190,9 +190,8 @@ impl<'src> Lexer<'src> {
         let mut tokens = Vec::new();
         loop {
             let token = lexer.next_token();
-            let done = token.kind == TokenKind::Eof;
             tokens.push(token);
-            if done {
+            if token.kind == TokenKind::Eof {
                 return tokens;
             }
         }
@@ -246,13 +245,7 @@ impl<'src> Lexer<'src> {
             }
             c if c.is_ascii_digit() => return self.number(start),
             c if is_ident_start(c) => {
-                while let Some(c) = self.first() {
-                    if is_ident_continue(c) {
-                        self.pos += c.len_utf8();
-                    } else {
-                        break;
-                    }
-                }
+                self.eat_while(is_ident_continue);
                 return self.token(TokenKind::Ident, start);
             }
             _ => TokenKind::Error(LexError::Unknown),
@@ -434,16 +427,11 @@ impl<'src> Lexer<'src> {
             };
             self.pos += 2;
             let mut any = false;
-            while let Some(c) = self.first() {
-                if c == '_' {
-                    self.pos += 1;
-                } else if c.is_digit(radix) {
-                    any = true;
-                    self.pos += 1;
-                } else {
-                    break;
-                }
-            }
+            self.eat_while(|c| {
+                let digit = c.is_digit(radix);
+                any |= digit;
+                digit || c == '_'
+            });
             // A digit that is out of range for the radix (the `2` in `0b12`) would otherwise
             // start a *second* number token, turning one bad literal into two good ones. An
             // alphabetic tail is not split — it is a numeric suffix, reported below.
@@ -490,26 +478,24 @@ impl<'src> Lexer<'src> {
         self.token(kind, start)
     }
 
-    /// Consumes ASCII digits and `_` separators.
-    fn eat_digits(&mut self) {
+    /// Consumes characters while `accept` returns `true`.
+    fn eat_while(&mut self, mut accept: impl FnMut(char) -> bool) {
         while let Some(c) = self.first() {
-            if c.is_ascii_digit() || c == '_' {
-                self.pos += 1;
-            } else {
+            if !accept(c) {
                 break;
             }
+            self.pos += c.len_utf8();
         }
+    }
+
+    /// Consumes ASCII digits and `_` separators.
+    fn eat_digits(&mut self) {
+        self.eat_while(|c| c.is_ascii_digit() || c == '_');
     }
 
     /// Consumes an identifier-shaped run of characters (used to widen error spans).
     fn eat_ident_tail(&mut self) {
-        while let Some(c) = self.first() {
-            if is_ident_continue(c) {
-                self.pos += c.len_utf8();
-            } else {
-                break;
-            }
-        }
+        self.eat_while(is_ident_continue);
     }
 
     /// Builds a token spanning `start..self.pos`.
@@ -525,9 +511,7 @@ impl<'src> Lexer<'src> {
     }
 
     fn second(&self) -> Option<char> {
-        let mut chars = self.source[self.pos..].chars();
-        chars.next();
-        chars.next()
+        self.source[self.pos..].chars().nth(1)
     }
 
     fn bump_char(&mut self) -> Option<char> {

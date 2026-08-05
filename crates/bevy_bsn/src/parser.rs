@@ -46,14 +46,6 @@ pub(crate) fn parse_path_str(source: &str) -> Option<BsnPath> {
     Some(path)
 }
 
-/// Which side of a patch a path was found on, used to pick between the "scene function" and
-/// "lowercase value path" diagnostics.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PathPosition {
-    Entry,
-    Value,
-}
-
 /// The parts of an entity collected while its entries are parsed.
 #[derive(Default)]
 struct EntityBuilder {
@@ -89,13 +81,11 @@ impl<'src> Parser<'src> {
     // -- token primitives ---------------------------------------------------------------
 
     fn peek_token(&self) -> Token {
-        match self.tokens.get(self.pos) {
-            Some(token) => *token,
-            None => Token {
-                kind: TokenKind::Eof,
-                span: Span::new(self.source.len() as u32, self.source.len() as u32),
-            },
-        }
+        let end = self.source.len() as u32;
+        self.tokens.get(self.pos).copied().unwrap_or(Token {
+            kind: TokenKind::Eof,
+            span: Span::new(end, end),
+        })
     }
 
     fn peek(&self) -> TokenKind {
@@ -187,6 +177,37 @@ impl<'src> Parser<'src> {
         self.depth = self.depth.saturating_sub(1);
     }
 
+    /// Runs `inner` one nesting level deeper, enforcing [`MAX_NESTING_DEPTH`].
+    fn nested<T>(
+        &mut self,
+        inner: impl FnOnce(&mut Self) -> Result<T, BsnParseError>,
+    ) -> Result<T, BsnParseError> {
+        self.enter()?;
+        let result = inner(self);
+        self.leave();
+        result
+    }
+
+    /// Comma-separated items with an optional trailing comma, up to (not including) `term`.
+    fn parse_list<T>(
+        &mut self,
+        term: TokenKind,
+        mut item: impl FnMut(&mut Self) -> Result<T, BsnParseError>,
+    ) -> Result<Vec<T>, BsnParseError> {
+        let mut items = Vec::new();
+        loop {
+            self.check_error_token()?;
+            if self.peek() == term {
+                break;
+            }
+            items.push(item(self)?);
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
+        }
+        Ok(items)
+    }
+
     // -- arenas -------------------------------------------------------------------------
 
     fn alloc_node(&mut self) -> BsnNodeId {
@@ -221,30 +242,18 @@ impl<'src> Parser<'src> {
     }
 
     fn finish(self, roots: Vec<BsnNodeId>) -> Result<BsnDocument, BsnParseError> {
-        let mut nodes = Vec::with_capacity(self.nodes.len());
-        for node in self.nodes {
-            match node {
-                Some(node) => nodes.push(node),
-                None => {
-                    return Err(BsnParseError::new(
-                        Span::NONE,
-                        BsnParseErrorKind::Internal("a reserved node was never finished"),
-                    ));
-                }
-            }
-        }
-        let mut values = Vec::with_capacity(self.values.len());
-        for value in self.values {
-            match value {
-                Some(value) => values.push(value),
-                None => {
-                    return Err(BsnParseError::new(
-                        Span::NONE,
-                        BsnParseErrorKind::Internal("a reserved value was never finished"),
-                    ));
-                }
-            }
-        }
+        // Every reserved slot is filled in by construction; a `None` is a bug in this crate.
+        let internal = |what| BsnParseError::new(Span::NONE, BsnParseErrorKind::Internal(what));
+        let nodes = self
+            .nodes
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| internal("a reserved node was never finished"))?;
+        let values = self
+            .values
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| internal("a reserved value was never finished"))?;
         Ok(BsnDocument {
             roots,
             nodes,
@@ -259,33 +268,15 @@ impl<'src> Parser<'src> {
         let roots = if self.peek() == TokenKind::Eof {
             Vec::new()
         } else {
-            self.parse_entity_list(TokenKind::Eof)?
+            self.parse_list(TokenKind::Eof, Self::parse_entity)?
         };
         self.expect(TokenKind::Eof, &["`,`", "end of file"])?;
         self.finish(roots)
     }
 
-    /// `entity_list = entity { "," entity } [ "," ]`
-    fn parse_entity_list(&mut self, term: TokenKind) -> Result<Vec<BsnNodeId>, BsnParseError> {
-        let mut entities = Vec::new();
-        loop {
-            if self.peek() == term {
-                break;
-            }
-            entities.push(self.parse_entity()?);
-            if !self.eat(TokenKind::Comma) {
-                break;
-            }
-        }
-        Ok(entities)
-    }
-
     /// `entity = "(" entity_body ")" | entity_body`
     fn parse_entity(&mut self) -> Result<BsnNodeId, BsnParseError> {
-        self.enter()?;
-        let result = self.parse_entity_inner();
-        self.leave();
-        result
+        self.nested(Self::parse_entity_inner)
     }
 
     fn parse_entity_inner(&mut self) -> Result<BsnNodeId, BsnParseError> {
@@ -406,7 +397,7 @@ impl<'src> Parser<'src> {
         let id = self.alloc_node();
         let path = self.parse_path()?;
         self.check_error_token()?;
-        self.classify_path(&path, PathPosition::Entry)?;
+        self.classify_path(&path, unsupported::FN)?;
         if self.peek() == TokenKind::LBracket {
             if prefix != BsnPatchPrefix::FromTemplate {
                 let token = self.peek_token();
@@ -416,7 +407,7 @@ impl<'src> Parser<'src> {
                 ));
             }
             self.bump();
-            let entities = self.parse_entity_list(TokenKind::RBracket)?;
+            let entities = self.parse_list(TokenKind::RBracket, Self::parse_entity)?;
             self.expect(TokenKind::RBracket, &["`,`", "`]`"])?;
             let span = Span::new(start.start, self.prev_end());
             self.finish_node(
@@ -430,7 +421,7 @@ impl<'src> Parser<'src> {
             builder.relations.push(id);
             return Ok(());
         }
-        let value = self.parse_patch_value(path.clone())?;
+        let value = self.parse_path_body(path.clone())?;
         let span = Span::new(start.start, self.prev_end());
         self.finish_node(
             id,
@@ -445,8 +436,8 @@ impl<'src> Parser<'src> {
         Ok(())
     }
 
-    /// The value of a patch: bare path, struct body or tuple body.
-    fn parse_patch_value(&mut self, path: BsnPath) -> Result<BsnValueId, BsnParseError> {
+    /// What follows a path in patch or value position: nothing, a struct body or a tuple body.
+    fn parse_path_body(&mut self, path: BsnPath) -> Result<BsnValueId, BsnParseError> {
         match self.peek() {
             TokenKind::LBrace => {
                 let id = self.alloc_value();
@@ -509,33 +500,14 @@ impl<'src> Parser<'src> {
     /// `tuple_body = "(" [ value { "," value } [ "," ] ] ")"`
     fn parse_tuple_body(&mut self) -> Result<Vec<BsnValueId>, BsnParseError> {
         self.expect(TokenKind::LParen, &["`(`"])?;
-        let items = self.parse_value_list(TokenKind::RParen)?;
+        let items = self.parse_list(TokenKind::RParen, Self::parse_value)?;
         self.expect(TokenKind::RParen, &["`,`", "`)`"])?;
-        Ok(items)
-    }
-
-    /// Comma-separated values with an optional trailing comma, up to (not including) `term`.
-    fn parse_value_list(&mut self, term: TokenKind) -> Result<Vec<BsnValueId>, BsnParseError> {
-        let mut items = Vec::new();
-        loop {
-            self.check_error_token()?;
-            if self.peek() == term {
-                break;
-            }
-            items.push(self.parse_value()?);
-            if !self.eat(TokenKind::Comma) {
-                break;
-            }
-        }
         Ok(items)
     }
 
     /// `value`
     fn parse_value(&mut self) -> Result<BsnValueId, BsnParseError> {
-        self.enter()?;
-        let result = self.parse_value_inner();
-        self.leave();
-        result
+        self.nested(Self::parse_value_inner)
     }
 
     fn parse_value_inner(&mut self) -> Result<BsnValueId, BsnParseError> {
@@ -610,7 +582,7 @@ impl<'src> Parser<'src> {
             TokenKind::LBracket => {
                 let id = self.alloc_value();
                 self.bump();
-                let items = self.parse_value_list(TokenKind::RBracket)?;
+                let items = self.parse_list(TokenKind::RBracket, Self::parse_value)?;
                 self.expect(TokenKind::RBracket, &["`,`", "`]`"])?;
                 let span = Span::new(token.span.start, self.prev_end());
                 self.finish_value(id, span, BsnValue::List(items));
@@ -677,7 +649,7 @@ impl<'src> Parser<'src> {
             return Ok(value);
         }
         let id = self.alloc_value();
-        let items = self.parse_value_list(TokenKind::RParen)?;
+        let items = self.parse_list(TokenKind::RParen, Self::parse_value)?;
         self.expect(TokenKind::RParen, &["`,`", "`)`"])?;
         let span = Span::new(open.span.start, self.prev_end());
         self.finish_value(id, span, BsnValue::Tuple(items));
@@ -718,35 +690,13 @@ impl<'src> Parser<'src> {
     fn parse_path_value(&mut self) -> Result<BsnValueId, BsnParseError> {
         let path = self.parse_path()?;
         self.check_error_token()?;
-        self.classify_path(&path, PathPosition::Value)?;
-        match self.peek() {
-            TokenKind::LBrace => {
-                let id = self.alloc_value();
-                let fields = self.parse_struct_body()?;
-                let span = Span::new(path.span.start, self.prev_end());
-                self.finish_value(id, span, BsnValue::Struct(path, fields));
-                Ok(id)
-            }
-            TokenKind::LParen => {
-                let id = self.alloc_value();
-                let items = self.parse_tuple_body()?;
-                let span = Span::new(path.span.start, self.prev_end());
-                self.finish_value(id, span, BsnValue::NamedTuple(path, items));
-                Ok(id)
-            }
-            _ => {
-                let span = path.span;
-                Ok(self.push_value(span, BsnValue::Path(path)))
-            }
-        }
+        self.classify_path(&path, unsupported::PATH_CASE)?;
+        self.parse_path_body(path)
     }
 
     /// `path = path_segment { "::" path_segment }`
     fn parse_path(&mut self) -> Result<BsnPath, BsnParseError> {
-        self.enter()?;
-        let result = self.parse_path_inner();
-        self.leave();
-        result
+        self.nested(Self::parse_path_inner)
     }
 
     fn parse_path_inner(&mut self) -> Result<BsnPath, BsnParseError> {
@@ -774,16 +724,7 @@ impl<'src> Parser<'src> {
         let ident = self.expect(TokenKind::Ident, &["identifier"])?;
         let mut generics = Vec::new();
         if self.eat(TokenKind::Lt) {
-            loop {
-                self.check_error_token()?;
-                if self.peek() == TokenKind::Gt {
-                    break;
-                }
-                generics.push(self.parse_path()?);
-                if !self.eat(TokenKind::Comma) {
-                    break;
-                }
-            }
+            generics = self.parse_list(TokenKind::Gt, Self::parse_path)?;
             self.expect(TokenKind::Gt, &["`,`", "`>`"])?;
         }
         Ok(BsnPathSegment {
@@ -795,7 +736,10 @@ impl<'src> Parser<'src> {
 
     /// Rejects paths that name Rust items an asset cannot reach: functions, constructors and
     /// constants. Casing is the same signal the `bsn!` macro uses.
-    fn classify_path(&self, path: &BsnPath, position: PathPosition) -> Result<(), BsnParseError> {
+    ///
+    /// `lowercase` is the diagnostic for a lowercase-initial path that is not a constructor:
+    /// [`unsupported::FN`] in entry position, [`unsupported::PATH_CASE`] in value position.
+    fn classify_path(&self, path: &BsnPath, lowercase: &'static str) -> Result<(), BsnParseError> {
         let last = path.last_ident();
         let Some(first_char) = last.chars().next() else {
             return Ok(());
@@ -815,10 +759,7 @@ impl<'src> Parser<'src> {
         if previous_is_type {
             return Err(self.unsupported(unsupported::CTOR, path.span));
         }
-        Err(match position {
-            PathPosition::Entry => self.unsupported(unsupported::FN, path.span),
-            PathPosition::Value => self.unsupported(unsupported::PATH_CASE, path.span),
-        })
+        Err(self.unsupported(lowercase, path.span))
     }
 }
 

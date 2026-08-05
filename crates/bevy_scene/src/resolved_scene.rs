@@ -79,7 +79,7 @@ impl ResolvedSceneRoot {
         entity: &mut EntityWorldMut,
         bundle_scratch: &mut BundleScratch,
     ) -> Result<(), ApplySceneError> {
-        self.apply_inner(entity, bundle_scratch, SpawnRecorder::None)
+        self.apply_inner(entity, bundle_scratch, None)
     }
 
     /// Applies this scene to `entity` exactly like [`ResolvedSceneRoot::apply`], and additionally
@@ -103,7 +103,7 @@ impl ResolvedSceneRoot {
         spawned: &mut Vec<Entity>,
     ) -> Result<(), ApplySceneError> {
         let root = entity.id();
-        let result = self.apply_inner(entity, bundle_scratch, SpawnRecorder::Record(spawned));
+        let result = self.apply_inner(entity, bundle_scratch, Some(&mut *spawned));
         // A related scene whose `#Name` resolves to the root would otherwise schedule the instance
         // entity itself for despawn on the next reload.
         spawned.retain(|spawned| *spawned != root);
@@ -116,7 +116,7 @@ impl ResolvedSceneRoot {
         &self,
         entity: &mut EntityWorldMut,
         bundle_scratch: &mut BundleScratch,
-        mut recorder: SpawnRecorder,
+        mut recorder: Option<&mut Vec<Entity>>,
     ) -> Result<(), ApplySceneError> {
         // A *fresh* map per apply is load-bearing: see `SceneEntityReference`'s `# Invariant`
         // section. References produced from a scene asset are identical for every spawn of that
@@ -126,15 +126,15 @@ impl ResolvedSceneRoot {
 
         let result = self
             .scene
-            .apply(&mut context, bundle_scratch, recorder.reborrow());
+            .apply(&mut context, bundle_scratch, recorder.as_deref_mut());
 
         // Union the reference map into the record: a forward `#Name` used only as a component
         // value materializes an entity through `SceneEntityReferences::get` that `apply_related`
         // never sees. Without this, every re-application leaks one ghost entity per such
         // reference. (Entities also recorded by `apply_related`, and a reference resolving to
         // the root, are handled by the caller's sort/dedup/retain.)
-        for referenced in entity_references.iter() {
-            recorder.push(referenced);
+        if let Some(recorder) = recorder {
+            recorder.extend(entity_references.iter());
         }
         if !bundle_scratch.is_empty() {
             // SAFETY: Components comes from the same world as the `context` passed in to self.scene.apply above
@@ -143,36 +143,6 @@ impl ResolvedSceneRoot {
             }
         }
         result
-    }
-}
-
-/// An optional sink for the entities spawned while applying a [`ResolvedScene`].
-///
-/// The immediate spawn / apply paths pass [`SpawnRecorder::None`], which every operation compiles
-/// away to nothing, so recording costs the non-reloadable paths nothing.
-enum SpawnRecorder<'a> {
-    /// Spawned entities are not recorded.
-    None,
-    /// Every entity spawned during the apply is pushed here.
-    Record(&'a mut Vec<Entity>),
-}
-
-impl SpawnRecorder<'_> {
-    #[inline]
-    fn push(&mut self, entity: Entity) {
-        if let Self::Record(entities) = self {
-            entities.push(entity);
-        }
-    }
-
-    /// Produces a shorter-lived recorder writing to the same sink, so that a recorder can be
-    /// passed down a recursive apply.
-    #[inline]
-    fn reborrow(&mut self) -> SpawnRecorder<'_> {
-        match self {
-            Self::None => SpawnRecorder::None,
-            Self::Record(entities) => SpawnRecorder::Record(entities),
-        }
     }
 }
 
@@ -238,7 +208,7 @@ impl ResolvedSceneListRoot {
                 &mut bundle_scratch,
                 // Scene-list hot reload is out of scope: a scene list spawns N roots with no
                 // owning instance entity to key re-application off.
-                SpawnRecorder::None,
+                None,
             );
             if let Err(err) = result {
                 // SAFETY: Components comes from the same world as the `context` passed in to self.scene.apply above
@@ -309,7 +279,7 @@ impl ResolvedScene {
         &self,
         context: &mut TemplateContext,
         bundle_scratch: &mut BundleScratch,
-        recorder: SpawnRecorder,
+        recorder: Option<&mut Vec<Entity>>,
     ) -> Result<(), ApplySceneError> {
         self.apply_with(context, bundle_scratch, |_, _| {}, recorder)
     }
@@ -330,7 +300,7 @@ impl ResolvedScene {
         context: &mut TemplateContext,
         bundle_scratch: &mut BundleScratch,
         writer_ops: impl FnOnce(&mut TemplateContext, &mut BundleWriter),
-        mut recorder: SpawnRecorder,
+        mut recorder: Option<&mut Vec<Entity>>,
     ) -> Result<(), ApplySceneError> {
         let mut bundle_writer = bundle_scratch.writer();
         for entity_reference in self.entity_references.iter().copied() {
@@ -391,7 +361,7 @@ impl ResolvedScene {
                 resolved_cached.scene.apply_related(
                     context,
                     bundle_scratch,
-                    recorder.reborrow(),
+                    recorder.as_deref_mut(),
                 )?;
                 self.apply_related(context, bundle_scratch, recorder)?;
             }
@@ -459,7 +429,7 @@ impl ResolvedScene {
         &self,
         context: &mut TemplateContext,
         bundle_scratch: &mut BundleScratch,
-        mut recorder: SpawnRecorder,
+        mut recorder: Option<&mut Vec<Entity>>,
     ) -> Result<(), ApplySceneError> {
         for related_resolved_scenes in self.related.values() {
             let target = context.entity.id();
@@ -481,7 +451,9 @@ impl ResolvedScene {
                     // A related entity is scene-owned however it was obtained: either it was
                     // spawned right here, or it was materialized earlier in this same apply by a
                     // forward `#Name` reference.
-                    recorder.push(entity.id());
+                    if let Some(spawned) = recorder.as_deref_mut() {
+                        spawned.push(entity.id());
+                    }
 
                     scene
                         .apply_with(
@@ -500,7 +472,7 @@ impl ResolvedScene {
                                     );
                                 }
                             },
-                            recorder.reborrow(),
+                            recorder.as_deref_mut(),
                         )
                         .map_err(|e| ApplySceneError::RelatedSceneError {
                             relationship_type_name: related_resolved_scenes.relationship_name,
@@ -1031,34 +1003,27 @@ fn recover_typed_template<T: Default + Send + Sync + 'static>(
     occupant: &dyn ErasedComponentTemplate,
     type_registry: Option<&TypeRegistry>,
 ) -> T {
-    let Some(type_registry) = type_registry else {
-        error!(
-            "The template slot for `{}` holds a template of a different type, and no TypeRegistry \
-             was available to convert it, so its values were reset to `Default`. Resolve this \
-             scene through `World::spawn_scene`, `EntityWorldMut::apply_scene` or the \
-             `resolve_scene_patches` system, or pass a `TypeRegistry` to \
-             `ResolvedSceneRoot::resolve`.",
-            core::any::type_name::<T>()
-        );
-        return T::default();
-    };
-
-    let recovered = erased_template_as_partial_reflect(occupant, type_registry)
-        .and_then(|reflect| {
-            type_registry
-                .get_type_data::<ReflectFromReflect>(TypeId::of::<T>())
-                .and_then(|from_reflect| from_reflect.from_reflect(reflect))
-        })
-        .and_then(|value| value.downcast::<T>().ok());
+    let recovered = type_registry.and_then(|type_registry| {
+        let reflect = erased_template_as_partial_reflect(occupant, type_registry)?;
+        let from_reflect = type_registry.get_type_data::<ReflectFromReflect>(TypeId::of::<T>())?;
+        from_reflect.from_reflect(reflect)?.downcast::<T>().ok()
+    });
 
     match recovered {
         Some(value) => *value,
         None => {
+            let hint = if type_registry.is_some() {
+                "It must derive `Reflect` (which registers `ReflectFromReflect`) and be registered \
+                 in the TypeRegistry."
+            } else {
+                "No TypeRegistry was available to convert it: resolve this scene through \
+                 `World::spawn_scene`, `EntityWorldMut::apply_scene` or the \
+                 `resolve_scene_patches` system, or pass a `TypeRegistry` to \
+                 `ResolvedSceneRoot::resolve`."
+            };
             error!(
                 "The template slot for `{0}` holds a template of a different type that could not \
-                 be converted back to `{0}`, so its values were reset to `Default`. `{0}` must \
-                 derive `Reflect` (which registers `ReflectFromReflect`) and be registered in the \
-                 TypeRegistry.",
+                 be converted back to `{0}`, so its values were reset to `Default`. {hint}",
                 core::any::type_name::<T>()
             );
             T::default()

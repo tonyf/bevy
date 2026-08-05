@@ -29,7 +29,8 @@ use bevy_reflect::{
 
 use crate::dynamic::build::{malformed, resolve_symbol, BuildCx, DynamicSceneBuildError};
 
-/// The fields supplied for an enum variant.
+/// The body that followed a path in the source: for an enum variant, the fields supplied for it.
+#[derive(Clone, Copy)]
 pub(crate) enum EnumInput<'a> {
     /// `Foo::Qux`
     Unit,
@@ -54,12 +55,12 @@ pub(crate) fn build_value(
         .ok_or_else(|| malformed(format!("no value with id {}", value.0), Span::NONE))?;
     let span = node.span;
     cx.enter(span)?;
-    let result = build_value_direct(cx, value, expected);
+    let result = build_value_direct(cx, &node.value, expected, span);
 
     // "Optionish" destinations accept their payload directly, mirroring `impl<T> From<T> for
     // Option<T>` and `impl<T> From<T> for OptionTemplate<T>` plus the `bsn!` macro's implicit
     // `.into()`. Explicit `None` / `Some(x)` never reach this: they match by variant name first.
-    let result = match result {
+    let built = match result {
         Err(err @ DynamicSceneBuildError::ValueTypeMismatch { .. }) => {
             match optionish_payload(cx.registry, expected) {
                 Some(payload) => match build_value(cx, value, payload) {
@@ -76,25 +77,20 @@ pub(crate) fn build_value(
             }
         }
         other => other,
-    };
+    }?;
 
     cx.exit();
-    result
+    Ok(built)
 }
 
 /// [`build_value`] without the "optionish" fallback.
 fn build_value_direct(
     cx: &mut BuildCx,
-    value: BsnValueId,
+    node: &BsnValue,
     expected: &TypeRegistration,
+    span: Span,
 ) -> Result<Box<dyn PartialReflect>, DynamicSceneBuildError> {
-    let node = cx
-        .document
-        .value(value)
-        .ok_or_else(|| malformed(format!("no value with id {}", value.0), Span::NONE))?;
-    let span = node.span;
-
-    match &node.value {
+    match node {
         BsnValue::Unit => {
             if expected.type_id() == TypeId::of::<()>() {
                 Ok(Box::new(()))
@@ -112,14 +108,15 @@ fn build_value_direct(
         BsnValue::Int(literal) => build_int(*literal, expected, span),
         BsnValue::Float(literal) => build_float(*literal, expected, span),
         BsnValue::String(literal) => build_string(cx, literal, expected, span),
-        BsnValue::Path(path) => build_path(cx, path, expected, span),
+        // A bare path is a unit struct or a unit enum variant.
+        BsnValue::Path(path) => build_named(cx, path, EnumInput::Unit, expected, span),
         BsnValue::Tuple(items) => build_tuple(cx, items, expected, span),
         BsnValue::List(items) => build_list(cx, items, expected, span),
         BsnValue::Struct(path, fields) => {
-            build_named(cx, path, NamedBody::Struct(fields), expected, span)
+            build_named(cx, path, EnumInput::Named(fields), expected, span)
         }
         BsnValue::NamedTuple(path, items) => {
-            build_named(cx, path, NamedBody::Tuple(items), expected, span)
+            build_named(cx, path, EnumInput::Tuple(items), expected, span)
         }
         BsnValue::EntityRef(name) => build_entity_ref(cx, name, expected, span),
     }
@@ -261,11 +258,7 @@ fn build_float(
         )]
         let value = literal as f32;
         if literal.is_finite() && !value.is_finite() {
-            return Err(DynamicSceneBuildError::ValueTypeMismatch {
-                found: "f64".to_string(),
-                expected: expected.type_info().type_path().to_string(),
-                span,
-            });
+            return Err(mismatch("f64", expected, span));
         }
         return Ok(Box::new(value));
     }
@@ -325,38 +318,11 @@ fn asset_path(literal: &str, span: Span) -> Result<AssetPath<'static>, DynamicSc
         })
 }
 
-/// A bare path: a unit struct, or a unit enum variant.
-fn build_path(
-    cx: &mut BuildCx,
-    path: &BsnPath,
-    expected: &TypeRegistration,
-    span: Span,
-) -> Result<Box<dyn PartialReflect>, DynamicSceneBuildError> {
-    build_named(cx, path, NamedBody::Unit, expected, span)
-}
-
-/// The body that followed a path in the source.
-enum NamedBody<'a> {
-    Unit,
-    Struct(&'a [(String, BsnValueId)]),
-    Tuple(&'a [BsnValueId]),
-}
-
-impl<'a> NamedBody<'a> {
-    fn as_enum_input(&self) -> EnumInput<'a> {
-        match self {
-            NamedBody::Unit => EnumInput::Unit,
-            NamedBody::Struct(fields) => EnumInput::Named(fields),
-            NamedBody::Tuple(items) => EnumInput::Tuple(items),
-        }
-    }
-}
-
 /// A value written as a path plus an optional body: `Marker`, `Foo::Qux`, `Bar { a: 1 }`, `Bar(2)`.
 fn build_named(
     cx: &mut BuildCx,
     path: &BsnPath,
-    body: NamedBody,
+    body: EnumInput,
     expected: &TypeRegistration,
     span: Span,
 ) -> Result<Box<dyn PartialReflect>, DynamicSceneBuildError> {
@@ -366,37 +332,23 @@ fn build_named(
         && let TypeInfo::Enum(info) = expected.type_info()
         && info.variant(path.last_ident()).is_some()
     {
-        let (full, _partial) =
-            build_enum_forms(cx, expected, path.last_ident(), body.as_enum_input(), span)?;
+        let (full, _partial) = build_enum_forms(cx, expected, path.last_ident(), body, span)?;
         return Ok(full);
     }
 
     let symbol = resolve_symbol(cx.registry, path, span)?;
     let named = symbol.registration;
 
-    if let Some(variant) = symbol.variant {
+    let partial = match symbol.variant {
         // An enum variant. `full` — every field of the variant defaulted, then the supplied fields
         // overlaid — is the right form for a *value*: a variant switch has to produce a complete
         // value. (The two-form treatment is only needed for top-level patches.)
-        let (full, _partial) = build_enum_forms(cx, named, variant, body.as_enum_input(), span)?;
-        if named.type_id() == expected.type_id() {
-            return Ok(full);
-        }
-        let mut value = default_value(named, span)?;
-        value
-            .try_apply(&*full)
-            .map_err(|error| DynamicSceneBuildError::ValueApplyFailed {
-                type_path: named.type_info().type_path().to_string(),
-                error: error.to_string(),
-                span,
-            })?;
-        return coerce(value, expected, span);
-    }
-
-    let partial = match &body {
-        NamedBody::Unit => None,
-        NamedBody::Struct(fields) => Some(build_partial_struct(cx, named, fields, span)?),
-        NamedBody::Tuple(items) => Some(build_partial_tuple_struct(cx, named, items, span)?),
+        Some(variant) => Some(build_enum_forms(cx, named, variant, body, span)?.0),
+        None => match body {
+            EnumInput::Unit => None,
+            EnumInput::Named(fields) => Some(build_partial_struct(cx, named, fields, span)?),
+            EnumInput::Tuple(items) => Some(build_partial_tuple_struct(cx, named, items, span)?),
+        },
     };
 
     // Same type as the destination: hand back the *partial* value, so that
@@ -506,19 +458,12 @@ pub(crate) fn build_partial_tuple_struct(
         });
     }
 
+    // `zip` stops at the shorter side, which is `items`: its length was just bounds-checked.
     let mut dynamic = DynamicTupleStruct::default();
     dynamic.set_represented_type(Some(registration.type_info()));
-    for (index, value) in items.iter().enumerate() {
-        // Infallible: `index` was just bounds-checked against `field_len`.
-        let Some(field) = info.field_at(index) else {
-            return Err(malformed(
-                "tuple field index out of range".to_string(),
-                span,
-            ));
-        };
+    for (field, value) in info.iter().zip(items) {
         let field_registration = cx.registration(field.ty().id(), field.type_path(), span)?;
-        let value = build_value(cx, *value, field_registration)?;
-        dynamic.insert_boxed(value);
+        dynamic.insert_boxed(build_value(cx, *value, field_registration)?);
     }
 
     Ok(Box::new(dynamic))
@@ -597,13 +542,7 @@ pub(crate) fn build_enum_forms(
             }
 
             let mut full = DynamicStruct::default();
-            for index in 0..variant_info.field_len() {
-                let Some(field) = variant_info.field_at(index) else {
-                    return Err(malformed(
-                        "variant field index out of range".to_string(),
-                        span,
-                    ));
-                };
+            for field in variant_info.iter() {
                 let field_registration =
                     cx.registration(field.ty().id(), field.type_path(), span)?;
                 full.insert_boxed(
@@ -638,28 +577,17 @@ pub(crate) fn build_enum_forms(
                 });
             }
 
+            // `zip` stops at the shorter side, which is `items`: its length was just
+            // bounds-checked.
             let mut partial = DynamicTuple::default();
-            for (index, value) in items.iter().enumerate() {
-                // Infallible: `index` was just bounds-checked against `field_len`.
-                let Some(field) = variant_info.field_at(index) else {
-                    return Err(malformed(
-                        "variant field index out of range".to_string(),
-                        span,
-                    ));
-                };
+            for (field, value) in variant_info.iter().zip(items) {
                 let field_registration =
                     cx.registration(field.ty().id(), field.type_path(), span)?;
                 partial.insert_boxed(build_value(cx, *value, field_registration)?);
             }
 
             let mut full = DynamicTuple::default();
-            for index in 0..variant_info.field_len() {
-                let Some(field) = variant_info.field_at(index) else {
-                    return Err(malformed(
-                        "variant field index out of range".to_string(),
-                        span,
-                    ));
-                };
+            for field in variant_info.iter() {
                 let field_registration =
                     cx.registration(field.ty().id(), field.type_path(), span)?;
                 full.insert_boxed(default_value(field_registration, span)?.into_partial_reflect());
@@ -721,15 +649,9 @@ fn build_tuple(
         });
     }
 
+    // `zip` stops at the shorter side, which is `items`: its length was just bounds-checked.
     let mut dynamic = DynamicTuple::default();
-    for (index, value) in items.iter().enumerate() {
-        // Infallible: `index` was just bounds-checked against `field_len`.
-        let Some(field) = info.field_at(index) else {
-            return Err(malformed(
-                "tuple field index out of range".to_string(),
-                span,
-            ));
-        };
+    for (field, value) in info.iter().zip(items) {
         let field_registration = cx.registration(field.ty().id(), field.type_path(), span)?;
         dynamic.insert_boxed(build_value(cx, *value, field_registration)?);
     }
@@ -1247,6 +1169,11 @@ mod tests {
                         if type_path.ends_with("NoDefault")
                 ),
                 "unexpected error: {error}"
+            );
+            // The diagnostic has to tell the user how to fix it.
+            assert!(
+                error.to_string().contains("#[reflect(Default)]"),
+                "unexpected message: {error}"
             );
         });
     }
