@@ -5,7 +5,8 @@ use crate::{
 use alloc::sync::Arc;
 use bevy_asset::{AssetEvent, AssetServer, Assets, Handle};
 use bevy_ecs::{
-    bundle::BundleScratch, message::MessageCursor, prelude::*, relationship::Relationship,
+    bundle::BundleScratch, message::MessageCursor, prelude::*, reflect::AppTypeRegistry,
+    relationship::Relationship,
 };
 use bevy_platform::collections::HashMap;
 use tracing::error;
@@ -186,9 +187,21 @@ pub trait WorldSceneExt {
 
 impl WorldSceneExt for World {
     fn spawn_scene<S: Scene>(&mut self, scene: S) -> Result<EntityWorldMut<'_>, SpawnSceneError> {
-        let assets = self.resource::<AssetServer>();
-        let mut patch = ScenePatch::load(assets, scene);
-        patch.resolve(assets, self.resource::<Assets<ScenePatch>>())?;
+        let patch = {
+            let assets = self.resource::<AssetServer>();
+            let mut patch = ScenePatch::load(assets, scene);
+            // The read guard is held only for the duration of `resolve`; `patch.spawn` below needs
+            // `&mut World`. A `Scene::resolve` impl must not take a write lock on the registry
+            // while this guard is alive.
+            let type_registry = self.get_resource::<AppTypeRegistry>();
+            let type_registry = type_registry.map(|registry| registry.read());
+            patch.resolve(
+                assets,
+                self.resource::<Assets<ScenePatch>>(),
+                type_registry.as_deref(),
+            )?;
+            patch
+        };
         patch.spawn(self)
     }
 
@@ -209,9 +222,21 @@ impl WorldSceneExt for World {
         &mut self,
         scenes: L,
     ) -> Result<Vec<Entity>, SpawnSceneError> {
-        let assets = self.resource::<AssetServer>();
-        let mut patch = SceneListPatch::load(assets, scenes);
-        patch.resolve(assets, self.resource::<Assets<ScenePatch>>())?;
+        let patch = {
+            let assets = self.resource::<AssetServer>();
+            let mut patch = SceneListPatch::load(assets, scenes);
+            // The read guard is held only for the duration of `resolve`; `patch.spawn` below needs
+            // `&mut World`. A `Scene::resolve` impl must not take a write lock on the registry
+            // while this guard is alive.
+            let type_registry = self.get_resource::<AppTypeRegistry>();
+            let type_registry = type_registry.map(|registry| registry.read());
+            patch.resolve(
+                assets,
+                self.resource::<Assets<ScenePatch>>(),
+                type_registry.as_deref(),
+            )?;
+            patch
+        };
         patch.spawn(self)
     }
 
@@ -501,9 +526,21 @@ impl EntityWorldMutSceneExt for EntityWorldMut<'_> {
     }
 
     fn apply_scene<S: Scene>(&mut self, scene: S) -> Result<(), SpawnSceneError> {
-        let assets = self.resource::<AssetServer>();
-        let mut patch = ScenePatch::load(assets, scene);
-        patch.resolve(assets, self.resource::<Assets<ScenePatch>>())?;
+        let patch = {
+            let assets = self.resource::<AssetServer>();
+            let mut patch = ScenePatch::load(assets, scene);
+            // The read guard is held only for the duration of `resolve`; `patch.apply` below needs
+            // `&mut EntityWorldMut`. A `Scene::resolve` impl must not take a write lock on the
+            // registry while this guard is alive.
+            let type_registry = self.get_resource::<AppTypeRegistry>();
+            let type_registry = type_registry.map(|registry| registry.read());
+            patch.resolve(
+                assets,
+                self.resource::<Assets<ScenePatch>>(),
+                type_registry.as_deref(),
+            )?;
+            patch
+        };
         patch.apply(self)
     }
 
@@ -611,12 +648,16 @@ pub fn resolve_scene_patches(
     mut patches: ResMut<Assets<ScenePatch>>,
     mut list_patches: ResMut<Assets<SceneListPatch>>,
     mut waiting: ResMut<WaitingScenes>,
+    type_registry: Option<Res<AppTypeRegistry>>,
 ) {
+    // Held across every `resolve` below. `Scene::resolve` impls must not write-lock the registry.
+    let type_registry_guard = type_registry.as_ref().map(|registry| registry.read());
+    let type_registry = type_registry_guard.as_deref();
     for event in events.read() {
         match *event {
             AssetEvent::LoadedWithDependencies { id } => {
                 if let Some(scene) = patches.get_mut(id).and_then(|mut p| p.scene.take()) {
-                    match ResolvedSceneRoot::resolve(scene, &assets, &patches) {
+                    match ResolvedSceneRoot::resolve(scene, &assets, &patches, type_registry) {
                         Ok(resolved) => {
                             let mut patch = patches.get_mut(id).unwrap();
                             patch.resolved = Some(Arc::new(resolved));
@@ -641,7 +682,7 @@ pub fn resolve_scene_patches(
         match *event {
             AssetEvent::LoadedWithDependencies { id } => {
                 if let Some(mut list_patch) = list_patches.get_mut(id)
-                    && let Err(err) = list_patch.resolve(&assets, &patches)
+                    && let Err(err) = list_patch.resolve(&assets, &patches, type_registry)
                 {
                     error!("Failed to resolve scene list {id}: {err}");
                 }

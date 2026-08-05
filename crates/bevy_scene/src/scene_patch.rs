@@ -12,7 +12,7 @@ use bevy_ecs::{
     template::FromTemplate,
     world::{EntityWorldMut, World},
 };
-use bevy_reflect::TypePath;
+use bevy_reflect::{TypePath, TypeRegistry};
 use thiserror::Error;
 
 /// An [`Asset`] that holds a [`Scene`], tracks its dependencies, and holds the [`ResolvedSceneRoot`] (after the [`Scene`] has been loaded and resolved).
@@ -54,14 +54,23 @@ impl ScenePatch {
 
     /// Resolves the current `scene` (using [`Scene::resolve`]). This should only be called after every dependency has loaded from the `scene`'s
     /// [`Scene::register_dependencies`]. If successful, it will store the resolved result in [`ScenePatch::resolved`].
+    ///
+    /// `type_registry` is required by reflection-driven [`Scene`] implementations and ignored by
+    /// statically-typed ones. See [`ResolveContext::type_registry`].
+    ///
+    /// [`ResolveContext::type_registry`]: crate::ResolveContext::type_registry
     pub fn resolve(
         &mut self,
         assets: &AssetServer,
         patches: &Assets<ScenePatch>,
+        type_registry: Option<&TypeRegistry>,
     ) -> Result<(), ResolveSceneError> {
         let scene = self.scene.take().ok_or(ResolveSceneError::MissingScene)?;
         self.resolved = Some(Arc::new(ResolvedSceneRoot::resolve(
-            scene, assets, patches,
+            scene,
+            assets,
+            patches,
+            type_registry,
         )?));
         Ok(())
     }
@@ -143,16 +152,27 @@ impl SceneListPatch {
 
     /// Resolves the current `scene` (using [`SceneList::resolve_list`]). This should only be called after every dependency has loaded from the `scene_list`'s
     /// [`SceneList::register_dependencies`].
+    ///
+    /// `type_registry` is required by reflection-driven [`Scene`] implementations and ignored by
+    /// statically-typed ones. See [`ResolveContext::type_registry`].
+    ///
+    /// [`ResolveContext::type_registry`]: crate::ResolveContext::type_registry
     pub fn resolve(
         &mut self,
         assets: &AssetServer,
         patches: &Assets<ScenePatch>,
+        type_registry: Option<&TypeRegistry>,
     ) -> Result<(), ResolveSceneError> {
         let scene_list = self
             .scene_list
             .take()
             .ok_or(ResolveSceneError::MissingScene)?;
-        self.resolved = Some(ResolvedSceneListRoot::resolve(scene_list, assets, patches)?);
+        self.resolved = Some(ResolvedSceneListRoot::resolve(
+            scene_list,
+            assets,
+            patches,
+            type_registry,
+        )?);
         Ok(())
     }
 

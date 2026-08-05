@@ -1,18 +1,25 @@
 use crate::{ResolveContext, ResolveSceneError, Scene, SceneList, ScenePatch};
 use bevy_asset::{AssetId, AssetPath, AssetServer, Assets, Handle, UntypedAssetId};
+use bevy_ecs::ptr::{Ptr, PtrMut};
 use bevy_ecs::{
     bundle::{Bundle, BundleScratch, BundleWriter},
     component::{Component, ComponentsRegistrator},
     entity::Entity,
     error::{BevyError, Result},
+    reflect::ReflectRelationshipTarget,
     relationship::{Relationship, RelationshipTarget},
     template::{SceneEntityReference, SceneEntityReferences, Template, TemplateContext},
     world::{EntityWorldMut, World},
 };
 use bevy_platform::collections::HashSet;
+use bevy_reflect::{PartialReflect, ReflectFromPtr, ReflectFromReflect, TypeRegistry};
 use bevy_utils::{TypeIdHashMap, TypeIdIndexMap};
-use core::any::{Any, TypeId};
+use core::{
+    any::{Any, TypeId},
+    ptr::NonNull,
+};
 use thiserror::Error;
+use tracing::error;
 
 /// A final "spawnable" root [`ResolvedScene`].
 pub struct ResolvedSceneRoot {
@@ -23,10 +30,14 @@ pub struct ResolvedSceneRoot {
 impl ResolvedSceneRoot {
     /// Resolves the current `scene` (using [`Scene::resolve`]). This should only be called after every dependency has loaded from the `scene`'s
     /// [`Scene::register_dependencies`].
+    ///
+    /// `type_registry` is required by reflection-driven [`Scene`] implementations and ignored by
+    /// statically-typed ones. See [`ResolveContext::type_registry`].
     pub fn resolve(
         scene: Box<dyn Scene>,
         assets: &AssetServer,
         patches: &Assets<ScenePatch>,
+        type_registry: Option<&TypeRegistry>,
     ) -> Result<Self, ResolveSceneError> {
         let mut resolved_scene = ResolvedScene::default();
         scene.resolve_box(
@@ -34,6 +45,7 @@ impl ResolvedSceneRoot {
                 assets,
                 patches,
                 cached: None,
+                type_registry,
             },
             &mut resolved_scene,
         )?;
@@ -67,6 +79,9 @@ impl ResolvedSceneRoot {
         entity: &mut EntityWorldMut,
         bundle_scratch: &mut BundleScratch,
     ) -> Result<(), ApplySceneError> {
+        // A *fresh* map per apply is load-bearing: see `SceneEntityReference`'s `# Invariant`
+        // section. References produced from a scene asset are identical for every spawn of that
+        // asset, so a shared map would alias entities across spawns.
         let mut entity_references = SceneEntityReferences::default();
         let mut context = TemplateContext::new(entity, &mut entity_references);
 
@@ -90,10 +105,14 @@ pub struct ResolvedSceneListRoot {
 impl ResolvedSceneListRoot {
     /// Resolves the current `scene_list` (using [`SceneList::resolve_list`]). This should only be
     /// called after every dependency has loaded from the `scene_list`'s [`SceneList::register_dependencies`].
+    ///
+    /// `type_registry` is required by reflection-driven [`Scene`] implementations and ignored by
+    /// statically-typed ones. See [`ResolveContext::type_registry`].
     pub fn resolve(
         scene_list: Box<dyn SceneList>,
         assets: &AssetServer,
         patches: &Assets<ScenePatch>,
+        type_registry: Option<&TypeRegistry>,
     ) -> Result<Self, ResolveSceneError> {
         let mut resolved_scenes = Vec::new();
         scene_list.resolve_list_box(
@@ -101,6 +120,7 @@ impl ResolvedSceneListRoot {
                 assets,
                 patches,
                 cached: None,
+                type_registry,
             },
             &mut resolved_scenes,
         )?;
@@ -119,6 +139,8 @@ impl ResolvedSceneListRoot {
         func: impl Fn(&mut EntityWorldMut),
     ) -> Result<Vec<Entity>, ApplySceneError> {
         let mut entities = Vec::new();
+        // A *fresh* map per spawn is load-bearing: see `SceneEntityReference`'s `# Invariant`
+        // section.
         let mut entity_references = SceneEntityReferences::default();
         let mut bundle_scratch = BundleScratch::default();
         for scene in self.scenes.iter() {
@@ -322,7 +344,7 @@ impl ResolvedScene {
         skip_templates: impl SkipTemplate,
     ) -> Result<(), ApplySceneError> {
         for template in &self.component_templates {
-            if skip_templates.should_skip((**template).type_id()) {
+            if skip_templates.should_skip(template.template_type_id()) {
                 continue;
             }
             // SAFETY: bundle_writer is used with the same World across all template.apply calls,
@@ -406,6 +428,14 @@ impl ResolvedScene {
     ///
     /// This will ignore [`Template`]s added to this scene using [`ResolvedScene::push_template`], as these are not registered as the "canonical"
     /// [`Template`] for a given [`TypeId`].
+    ///
+    /// If the slot for `T` is occupied by a template of a _different_ concrete type — which happens
+    /// when a cached scene resolved from a scene asset stored a reflection-driven template there —
+    /// this converts that template back into a `T`, preserving its field values, using
+    /// [`ReflectFromReflect`] from [`ResolveContext::type_registry`]. Fields the reflection system
+    /// cannot see (`#[reflect(ignore)]`) come back as their [`Default`]. If no registry is
+    /// available, or `T` cannot be produced from reflection, the slot is reset to `T::default()`
+    /// and an error is logged: patched values are lost, but resolution never panics.
     pub fn get_or_insert_template<
         'a,
         T: Template<Output: Component> + Default + Send + Sync + 'static,
@@ -413,12 +443,22 @@ impl ResolvedScene {
         &'a mut self,
         context: &mut ResolveContext,
     ) -> &'a mut T {
-        (self.get_or_insert_erased_template(context, TypeId::of::<T>(), || Box::new(T::default()))
-            as &mut dyn Any)
-            // PERF: this could be unchecked, given that we control what is stored here
-            // The method isn't stable yet, and it would require making get_or_insert_erased_template unsafe
-            .downcast_mut()
-            .unwrap()
+        let index = self.get_or_insert_erased_template_index(context, TypeId::of::<T>(), || {
+            Box::new(T::default())
+        });
+        let slot = &mut self.component_templates[index];
+
+        if !(&**slot as &dyn Any).is::<T>() {
+            // Two statements: `*slot = Box::new(recover(&**slot, ..))` would hold a shared borrow
+            // of `*slot` across the assignment and be rejected by the borrow checker.
+            let recovered = recover_typed_template::<T>(&**slot, context.type_registry);
+            *slot = Box::new(recovered);
+        }
+
+        // PERF: this could be unchecked, given that we control what is stored here
+        // The method isn't stable yet, and it would require making get_or_insert_erased_template unsafe
+        // Infallible: the branch above replaced any occupant that was not a `T`.
+        (&mut **slot as &mut dyn Any).downcast_mut().unwrap()
     }
 
     /// Inserts the given [`Template`]. This will overwrite the existing [`Template`] of that type if it already exists.
@@ -430,6 +470,8 @@ impl ResolvedScene {
     }
 
     /// Inserts the given [`Template`] with the given `type_id`. This will overwrite the existing [`Template`] of that type if it already exists.
+    ///
+    /// For correctness, the stored template's [`ErasedComponentTemplate::template_type_id`] must equal `type_id`.
     pub fn insert_erased_template(
         &mut self,
         type_id: TypeId,
@@ -451,7 +493,10 @@ impl ResolvedScene {
 
     /// This will get the [`ErasedComponentTemplate`] for the given [`TypeId`], if it already exists in this [`ResolvedScene`]. If it doesn't exist,
     /// it will use the `default` function to create a new [`ErasedComponentTemplate`]. _For correctness, the [`TypeId`] of the [`Template`] returned
-    /// by `default` should match the passed in `type_id`_.
+    /// by `default` should match the passed in `type_id`_. More precisely, the stored template's
+    /// [`ErasedComponentTemplate::template_type_id`] must equal `type_id`.
+    ///
+    /// `default` is only called when neither this [`ResolvedScene`] nor its cached scene already contains a template for `type_id`.
     ///
     /// This uses "copy-on-write" behavior for cached scenes. If a [`Template`] is requested which the cached scene has as well,
     /// it will be cloned (using [`Template::clone_template`]), added to the current [`ResolvedScene`], and returned.
@@ -462,10 +507,23 @@ impl ResolvedScene {
         &'a mut self,
         context: &mut ResolveContext,
         type_id: TypeId,
-        default: fn() -> Box<dyn ErasedComponentTemplate>,
+        default: impl FnOnce() -> Box<dyn ErasedComponentTemplate>,
     ) -> &'a mut dyn ErasedComponentTemplate {
+        let index = self.get_or_insert_erased_template_index(context, type_id, default);
+        // The index was just produced by the call above, so it is in bounds.
+        &mut *self.component_templates[index]
+    }
+
+    /// The shared implementation of [`ResolvedScene::get_or_insert_erased_template`], returning the
+    /// index into `component_templates` so that callers can re-borrow `self`.
+    fn get_or_insert_erased_template_index(
+        &mut self,
+        context: &mut ResolveContext,
+        type_id: TypeId,
+        default: impl FnOnce() -> Box<dyn ErasedComponentTemplate>,
+    ) -> usize {
         let mut is_cached = false;
-        let index = self.template_indices.entry(type_id).or_insert_with(|| {
+        let index = *self.template_indices.entry(type_id).or_insert_with(|| {
             let index = self.component_templates.len();
             let value = if let Some(cached_patch) = &mut context.cached
                 && let Some(resolved_cached) = &cached_patch.resolved
@@ -480,11 +538,6 @@ impl ResolvedScene {
             self.component_templates.push(value);
             index
         });
-        let template = self
-            .component_templates
-            .get_mut(*index)
-            .map(|value| &mut **value)
-            .unwrap();
 
         if is_cached {
             self.cached
@@ -494,7 +547,7 @@ impl ResolvedScene {
                 .insert(type_id);
         }
 
-        template
+        index
     }
 
     /// Returns the [`ErasedComponentTemplate`] for the given `type_id`, if it exists in this [`ResolvedScene`]. This ignores cached scenes.
@@ -540,6 +593,32 @@ impl ResolvedScene {
         self.related
             .entry(TypeId::of::<R>())
             .or_insert_with(RelatedResolvedScenes::new::<R>)
+    }
+
+    /// The type-erased counterpart of [`ResolvedScene::get_or_insert_related_resolved_scenes`],
+    /// for callers that only have a [`ReflectRelationshipTarget`] (looked up from the
+    /// [`TypeRegistry`] on a [`RelationshipTarget`] type such as [`Children`]).
+    ///
+    /// This uses the **same** keying as the generic method —
+    /// [`ReflectRelationshipTarget::relationship_type_id`], i.e. `TypeId::of::<ChildOf>()` — so
+    /// statically- and dynamically-defined children of the same relationship land in a single
+    /// [`RelatedResolvedScenes`] and are spawned as one contiguous group, in the order the scenes
+    /// were pushed.
+    ///
+    /// [`Children`]: bevy_ecs::hierarchy::Children
+    pub fn get_or_insert_related_resolved_scenes_erased(
+        &mut self,
+        data: &ReflectRelationshipTarget,
+    ) -> &mut RelatedResolvedScenes {
+        self.related
+            .entry(data.relationship_type_id)
+            .or_insert_with(|| {
+                RelatedResolvedScenes::new_erased(
+                    data.insert_relationship,
+                    data.insert_relationship_target,
+                    data.relationship_name,
+                )
+            })
     }
 
     /// Configures this [`ResolvedScene`] to include the given [`ScenePatch`] cached.
@@ -670,13 +749,12 @@ impl core::fmt::Debug for RelatedResolvedScenes {
 impl RelatedResolvedScenes {
     /// Creates a new empty [`RelatedResolvedScenes`] for the given relationship type.
     pub fn new<R: Relationship>() -> Self {
-        Self {
-            scenes: Vec::new(),
-            insert_relationship: |bundle_writer, components_registrator, target| {
+        Self::new_erased(
+            |bundle_writer, components_registrator, target| {
                 // SAFETY: caller ensures bundler_writer is always used with the same World
                 unsafe { bundle_writer.push_component(components_registrator, R::from(target)) };
             },
-            insert_relationship_target: |bundle_writer, components_registrator, capacity| {
+            |bundle_writer, components_registrator, capacity| {
                 let relationship_target =
                     <<R as Relationship>::RelationshipTarget as RelationshipTarget>::with_capacity(
                         capacity,
@@ -686,7 +764,31 @@ impl RelatedResolvedScenes {
                     bundle_writer.push_component(components_registrator, relationship_target);
                 };
             },
-            relationship_name: core::any::type_name::<R>(),
+            core::any::type_name::<R>(),
+        )
+    }
+
+    /// Creates a new empty [`RelatedResolvedScenes`] from already type-erased relationship
+    /// functions, for callers that only have runtime type information.
+    ///
+    /// The three arguments have exactly the semantics of the same-named fields; the canonical
+    /// source of a matching set is [`ReflectRelationshipTarget`], whose function pointers have the
+    /// same bodies as [`RelatedResolvedScenes::new`]'s.
+    ///
+    /// The stored function pointers are `unsafe fn` whose contracts are discharged at *call* time
+    /// by [`ResolvedScene`]'s apply path, so this constructor itself is safe. They must nonetheless
+    /// be a matching pair for a single [`Relationship`] type, or spawning will produce entities
+    /// with mismatched relationship / relationship-target components.
+    pub fn new_erased(
+        insert_relationship: unsafe fn(&mut BundleWriter, &mut ComponentsRegistrator, Entity),
+        insert_relationship_target: unsafe fn(&mut BundleWriter, &mut ComponentsRegistrator, usize),
+        relationship_name: &'static str,
+    ) -> Self {
+        Self {
+            scenes: Vec::new(),
+            insert_relationship,
+            insert_relationship_target,
+            relationship_name,
         }
     }
 }
@@ -709,6 +811,150 @@ pub trait ErasedComponentTemplate: Any + Send + Sync {
 
     /// Clones this template. See [`Clone`].
     fn clone_template(&self) -> Box<dyn ErasedComponentTemplate>;
+
+    /// Returns a [`PartialReflect`] view of the value this template will build from, if this
+    /// template stores its data in a type-erased, reflected form.
+    ///
+    /// This returns `None` for ordinary statically-typed templates (everything covered by the
+    /// blanket `impl<T: Template<Output: Component>> ErasedComponentTemplate for T`), because the
+    /// blanket impl cannot know whether `T` implements [`PartialReflect`]. Use
+    /// [`erased_template_as_partial_reflect`] instead, which additionally recovers a reflected
+    /// view of statically-typed templates through the [`TypeRegistry`].
+    fn try_as_partial_reflect(&self) -> Option<&dyn PartialReflect> {
+        None
+    }
+
+    /// The mutable counterpart of [`ErasedComponentTemplate::try_as_partial_reflect`]. This is
+    /// how a runtime-constructed patch (e.g. one produced by a scene asset loader) writes fields
+    /// into a template it did not create.
+    ///
+    /// See [`erased_template_as_partial_reflect_mut`].
+    fn try_as_partial_reflect_mut(&mut self) -> Option<&mut dyn PartialReflect> {
+        None
+    }
+
+    /// The [`TypeId`] of the [`Template`] this erased template stands in for — the key under which
+    /// it was filed by [`ResolvedScene::insert_erased_template`] /
+    /// [`ResolvedScene::get_or_insert_erased_template`].
+    ///
+    /// This defaults to the implementor's own concrete Rust type, which is correct for every
+    /// statically-typed template (the blanket impl's `Self` _is_ the template type). Templates
+    /// that store their value type-erased — such as a template built by a scene asset loader —
+    /// **must** override this to return the template type they represent, or the cached
+    /// copy-on-write duplicate check will fail to skip them and the same component will be
+    /// written twice.
+    fn template_type_id(&self) -> TypeId {
+        Any::type_id(self)
+    }
+}
+
+/// Returns a [`PartialReflect`] view of an [`ErasedComponentTemplate`], if one can be obtained.
+///
+/// This first asks the template itself ([`ErasedComponentTemplate::try_as_partial_reflect`]),
+/// which is how templates that store an erased `Box<dyn Reflect>` answer. If the template does not
+/// answer, and the template's *concrete* Rust type is a registered [`Reflect`] type, the value is
+/// viewed through [`ReflectFromPtr`]. This second path is what makes a statically-defined `bsn!`
+/// template (for example the canonical template of a `#[derive(Component, Reflect, Clone, Default)]`
+/// component, which is the component type itself) patchable by a runtime-constructed scene.
+///
+/// Returns `None` if neither path applies — typically a template type generated by
+/// `#[derive(FromTemplate)]` without `#[template(reflect)]`, or a [`Reflect`] type that was never
+/// registered.
+///
+/// [`Reflect`]: bevy_reflect::Reflect
+pub fn erased_template_as_partial_reflect<'a>(
+    template: &'a dyn ErasedComponentTemplate,
+    type_registry: &TypeRegistry,
+) -> Option<&'a dyn PartialReflect> {
+    // See the `_mut` version for why the call is duplicated.
+    if template.try_as_partial_reflect().is_some() {
+        return template.try_as_partial_reflect();
+    }
+
+    let type_id = (*template).type_id();
+    let from_ptr = type_registry.get_type_data::<ReflectFromPtr>(type_id)?;
+    debug_assert_eq!(from_ptr.type_id(), type_id);
+    let ptr = core::ptr::from_ref::<dyn ErasedComponentTemplate>(template).cast::<u8>();
+    // SAFETY: same argument as the `_mut` version below, with a shared borrow: `ptr` is the data
+    // pointer of the `&'a` borrow of `template`, so it is non-null, aligned and valid for reads
+    // for `'a`; `type_id` is the concrete type of the pointee and is the type `from_ptr` was
+    // created for. `cast_mut` is only needed to build a `NonNull`; the pointer is never written.
+    let reflect = unsafe { from_ptr.as_reflect(Ptr::new(NonNull::new_unchecked(ptr.cast_mut()))) };
+    Some(reflect.as_partial_reflect())
+}
+
+/// The mutable counterpart of [`erased_template_as_partial_reflect`].
+pub fn erased_template_as_partial_reflect_mut<'a>(
+    template: &'a mut dyn ErasedComponentTemplate,
+    type_registry: &TypeRegistry,
+) -> Option<&'a mut dyn PartialReflect> {
+    // Templates that store their value type-erased know their own reflected view, which is not
+    // their concrete Rust type. Ask them first.
+    //
+    // NOTE: the call is deliberately duplicated: NLL cannot see that the borrow taken by the `if`
+    // condition ends before the `return`. Both trait impls are trivial accessors.
+    if template.try_as_partial_reflect_mut().is_some() {
+        return template.try_as_partial_reflect_mut();
+    }
+
+    let type_id = (*template).type_id();
+    let from_ptr = type_registry.get_type_data::<ReflectFromPtr>(type_id)?;
+    debug_assert_eq!(from_ptr.type_id(), type_id);
+    let ptr = core::ptr::from_mut::<dyn ErasedComponentTemplate>(template).cast::<u8>();
+    // SAFETY:
+    // - `ptr` is the data pointer of the `&'a mut` borrow of `template`, which the cast above
+    //   consumed, so it is non-null, well-aligned for the pointee, and uniquely valid for `'a`.
+    // - `type_id` is the concrete type of that pointee (`Any::type_id` through the
+    //   `ErasedComponentTemplate: Any` supertrait), and `from_ptr` was created for exactly that
+    //   type (looked up by `type_id`; re-asserted above), which is `as_reflect_mut`'s contract.
+    let reflect = unsafe { from_ptr.as_reflect_mut(PtrMut::new(NonNull::new_unchecked(ptr))) };
+    Some(reflect.as_partial_reflect_mut())
+}
+
+/// Produces a `T` from a template that occupies `T`'s slot but is not a `T`.
+///
+/// This happens when a cached scene (typically resolved from a `.bsn` asset) stored a
+/// reflection-driven template under `T`'s [`TypeId`], and a statically-typed patch then asks for
+/// `&mut T`. Field values from `occupant` are preserved when both a reflected view of it and
+/// [`ReflectFromReflect`] for `T` are available; otherwise `T::default()` is returned and an error
+/// is logged. A `.bsn` file is user data, so this must never panic.
+fn recover_typed_template<T: Default + Send + Sync + 'static>(
+    occupant: &dyn ErasedComponentTemplate,
+    type_registry: Option<&TypeRegistry>,
+) -> T {
+    let Some(type_registry) = type_registry else {
+        error!(
+            "The template slot for `{}` holds a template of a different type, and no TypeRegistry \
+             was available to convert it, so its values were reset to `Default`. Resolve this \
+             scene through `World::spawn_scene`, `EntityWorldMut::apply_scene` or the \
+             `resolve_scene_patches` system, or pass a `TypeRegistry` to \
+             `ResolvedSceneRoot::resolve`.",
+            core::any::type_name::<T>()
+        );
+        return T::default();
+    };
+
+    let recovered = erased_template_as_partial_reflect(occupant, type_registry)
+        .and_then(|reflect| {
+            type_registry
+                .get_type_data::<ReflectFromReflect>(TypeId::of::<T>())
+                .and_then(|from_reflect| from_reflect.from_reflect(reflect))
+        })
+        .and_then(|value| value.downcast::<T>().ok());
+
+    match recovered {
+        Some(value) => *value,
+        None => {
+            error!(
+                "The template slot for `{0}` holds a template of a different type that could not \
+                 be converted back to `{0}`, so its values were reset to `Default`. `{0}` must \
+                 derive `Reflect` (which registers `ReflectFromReflect`) and be registered in the \
+                 TypeRegistry.",
+                core::any::type_name::<T>()
+            );
+            T::default()
+        }
+    }
 }
 
 impl<T: Template<Output: Component> + Send + Sync + 'static> ErasedComponentTemplate for T {

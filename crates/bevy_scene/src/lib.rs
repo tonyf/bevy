@@ -2953,4 +2953,483 @@ mod tests {
 
         assert_eq!(expected_id, actual_id);
     }
+
+    /// Tests for the type-erased scene APIs (`ErasedComponentTemplate` reflection views, erased
+    /// related scenes, and `ResolveContext::type_registry`-driven typed recovery).
+    mod erased_scene_apis {
+        use super::*;
+        use crate::{
+            erased_template_as_partial_reflect_mut, ErasedComponentTemplate, RelatedResolvedScenes,
+            ResolveContext, ResolveSceneError, ResolvedScene, SceneFunction,
+        };
+        use bevy_ecs::{
+            bundle::BundleWriter, error::BevyError, hierarchy::ChildOf, reflect::AppTypeRegistry,
+            reflect::ReflectRelationshipTarget, template::TemplateContext,
+        };
+        use bevy_reflect::{
+            tuple_struct::DynamicTupleStruct, ApplyError, PartialReflect, Reflect, ReflectKind,
+            TypeRegistry, Typed,
+        };
+        use core::any::{Any, TypeId};
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Component, Reflect, Clone, Default, Debug, PartialEq)]
+        struct Marker(u32);
+
+        #[derive(Component, Reflect, Clone, Default, Debug, PartialEq)]
+        struct Position {
+            x: f32,
+            y: f32,
+            z: f32,
+        }
+
+        /// Stands in for a reflection-driven dynamic template: it is filed under `type_id` but its
+        /// own concrete type is `FakeDynamicTemplate`. Deliberately not [`Clone`], so that it does
+        /// not pick up the blanket `Template` (and therefore `ErasedComponentTemplate`) impl.
+        struct FakeDynamicTemplate<T> {
+            type_id: TypeId,
+            value: T,
+        }
+
+        static FAKE_APPLY_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+        impl<T: Component + Reflect + Clone> ErasedComponentTemplate for FakeDynamicTemplate<T> {
+            unsafe fn apply(
+                &self,
+                context: &mut TemplateContext,
+                bundle_writer: &mut BundleWriter,
+            ) -> Result<(), BevyError> {
+                FAKE_APPLY_COUNT.fetch_add(1, Ordering::Relaxed);
+                // SAFETY: world_mut is only used to register components, which does not affect the
+                // entity location.
+                let mut components = unsafe { context.entity.world_mut().components_registrator() };
+                // SAFETY: the caller guarantees `bundle_writer` is always used with the same World
+                // that is stored in `context`.
+                unsafe { bundle_writer.push_component(&mut components, self.value.clone()) };
+                Ok(())
+            }
+
+            fn clone_template(&self) -> Box<dyn ErasedComponentTemplate> {
+                Box::new(FakeDynamicTemplate {
+                    type_id: self.type_id,
+                    value: self.value.clone(),
+                })
+            }
+
+            fn template_type_id(&self) -> TypeId {
+                self.type_id
+            }
+
+            fn try_as_partial_reflect(&self) -> Option<&dyn PartialReflect> {
+                Some(&self.value)
+            }
+
+            fn try_as_partial_reflect_mut(&mut self) -> Option<&mut dyn PartialReflect> {
+                Some(&mut self.value)
+            }
+        }
+
+        /// Runs `func` as the body of a `Scene`, spawns the result, and returns the root entity.
+        fn spawn_scene_function(
+            app: &mut App,
+            func: impl FnOnce(&mut ResolveContext, &mut ResolvedScene) + Send + Sync + 'static,
+        ) -> Entity {
+            app.world_mut()
+                .spawn_scene(SceneFunction(func))
+                .unwrap()
+                .id()
+        }
+
+        // 1 — C1
+        #[test]
+        fn erased_template_default_accepts_capturing_closure() {
+            let mut app = test_app();
+            let captured = 7u32;
+            let id = spawn_scene_function(&mut app, move |context, scene| {
+                scene.get_or_insert_erased_template(context, TypeId::of::<Marker>(), move || {
+                    Box::new(Marker(captured))
+                });
+            });
+
+            assert_eq!(app.world().entity(id).get::<Marker>(), Some(&Marker(7)));
+        }
+
+        // 2 — C1
+        #[test]
+        fn erased_template_default_called_at_most_once() {
+            static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+            let mut app = test_app();
+            let id = spawn_scene_function(&mut app, |context, scene| {
+                scene.get_or_insert_erased_template(context, TypeId::of::<Marker>(), || {
+                    CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+                    Box::new(Marker(1))
+                });
+                scene.get_or_insert_erased_template(context, TypeId::of::<Marker>(), || {
+                    CALL_COUNT.fetch_add(1, Ordering::Relaxed);
+                    Box::new(Marker(2))
+                });
+            });
+
+            assert_eq!(CALL_COUNT.load(Ordering::Relaxed), 1);
+            assert_eq!(app.world().entity(id).get::<Marker>(), Some(&Marker(1)));
+        }
+
+        // 3 — C2.a
+        #[test]
+        fn typed_template_is_not_directly_reflectable() {
+            let mut template: Box<dyn ErasedComponentTemplate> = Box::new(Marker(1));
+            assert!(template.try_as_partial_reflect().is_none());
+            assert!(template.try_as_partial_reflect_mut().is_none());
+        }
+
+        // 4 — C2.b
+        #[test]
+        fn registry_assisted_reflect_view_of_typed_template() {
+            let mut registry = TypeRegistry::empty();
+            registry.register::<Marker>();
+
+            let mut template: Box<dyn ErasedComponentTemplate> = Box::new(Marker(1));
+            let reflect =
+                erased_template_as_partial_reflect_mut(&mut *template, &registry).unwrap();
+
+            let mut patch = DynamicTupleStruct::default();
+            patch.insert(5u32);
+            patch.set_represented_type(Some(Marker::type_info()));
+            reflect.try_apply(&patch).unwrap();
+
+            assert_eq!(
+                (&*template as &dyn Any).downcast_ref::<Marker>(),
+                Some(&Marker(5))
+            );
+        }
+
+        // 5 — C2.b
+        #[test]
+        fn unregistered_template_has_no_reflect_view() {
+            let registry = TypeRegistry::empty();
+            let mut template: Box<dyn ErasedComponentTemplate> = Box::new(Marker(1));
+            assert!(erased_template_as_partial_reflect_mut(&mut *template, &registry).is_none());
+        }
+
+        // 6 — C6
+        #[test]
+        fn template_type_id_defaults_to_concrete_type() {
+            assert_eq!(Marker(1).template_type_id(), TypeId::of::<Marker>());
+
+            let fake = FakeDynamicTemplate {
+                type_id: TypeId::of::<Marker>(),
+                value: Marker(1),
+            };
+            assert_eq!(fake.template_type_id(), TypeId::of::<Marker>());
+            assert_ne!((&fake as &dyn Any).type_id(), TypeId::of::<Marker>());
+        }
+
+        // 7 — C6, through the real cached copy-on-write path.
+        #[test]
+        fn cached_dynamic_template_is_not_applied_twice() {
+            fn base() -> impl Scene {
+                SceneFunction(|_context: &mut ResolveContext, scene: &mut ResolvedScene| {
+                    scene.insert_erased_template(
+                        TypeId::of::<Marker>(),
+                        Box::new(FakeDynamicTemplate {
+                            type_id: TypeId::of::<Marker>(),
+                            value: Marker(1),
+                        }),
+                    );
+                })
+            }
+
+            #[derive(TypePath)]
+            struct FakeSceneLoader;
+
+            impl AssetLoader for FakeSceneLoader {
+                type Asset = ScenePatch;
+                type Error = std::io::Error;
+                type Settings = ();
+
+                async fn load(
+                    &self,
+                    _reader: &mut dyn bevy_asset::io::Reader,
+                    _settings: &Self::Settings,
+                    load_context: &mut bevy_asset::LoadContext<'_>,
+                ) -> Result<Self::Asset, Self::Error> {
+                    Ok(ScenePatch::load_with(load_context, base()))
+                }
+            }
+
+            let mut app = App::new();
+            let dir = Dir::default();
+            let dir_clone = dir.clone();
+            app.register_asset_source(
+                AssetSourceId::Default,
+                AssetSourceBuilder::new(move || {
+                    Box::new(MemoryAssetReader {
+                        root: dir_clone.clone(),
+                    })
+                }),
+            );
+            app.add_plugins((
+                TaskPoolPlugin::default(),
+                AssetPlugin::default(),
+                ScenePlugin,
+            ));
+            app.finish();
+            app.cleanup();
+            app.register_asset_loader(FakeSceneLoader);
+
+            dir.insert_asset_text(Path::new("dynamic_base.bsn"), "");
+            let asset_server = app.world().resource::<AssetServer>().clone();
+            let handle: Handle<ScenePatch> = asset_server.load("dynamic_base.bsn");
+            run_app_until(&mut app, || asset_server.is_loaded(&handle));
+
+            FAKE_APPLY_COUNT.store(0, Ordering::Relaxed);
+            let id = app
+                .world_mut()
+                .spawn_scene((
+                    bsn! { :"dynamic_base.bsn" },
+                    SceneFunction(|context: &mut ResolveContext, scene: &mut ResolvedScene| {
+                        // Triggers the copy-on-write clone of the cached dynamic template, which
+                        // records it in `duplicate_templates`.
+                        scene.get_or_insert_erased_template(
+                            context,
+                            TypeId::of::<Marker>(),
+                            || Box::new(Marker(9)),
+                        );
+                        scene.insert_erased_template(TypeId::of::<Marker>(), Box::new(Marker(9)));
+                    }),
+                ))
+                .unwrap()
+                .id();
+
+            assert_eq!(FAKE_APPLY_COUNT.load(Ordering::Relaxed), 0);
+            assert_eq!(app.world().entity(id).get::<Marker>(), Some(&Marker(9)));
+        }
+
+        /// Builds a `ResolvedScene` whose `Position` slot holds a dynamic template, then applies a
+        /// typed `Position` patch with the given registry, returning the resulting template value.
+        fn typed_patch_over_dynamic_base(
+            app: &App,
+            type_registry: Option<&TypeRegistry>,
+        ) -> Position {
+            let world = app.world();
+            let mut context = ResolveContext {
+                assets: world.resource::<AssetServer>(),
+                patches: world.resource::<Assets<ScenePatch>>(),
+                cached: None,
+                type_registry,
+            };
+            let mut scene = ResolvedScene::default();
+            scene.insert_erased_template(
+                TypeId::of::<Position>(),
+                Box::new(FakeDynamicTemplate {
+                    type_id: TypeId::of::<Position>(),
+                    value: Position {
+                        x: 0.,
+                        y: 2.,
+                        z: 0.,
+                    },
+                }),
+            );
+
+            let position = scene.get_or_insert_template::<Position>(&mut context);
+            position.x = 1.;
+            position.clone()
+        }
+
+        // 8 — C7, the headline case.
+        #[test]
+        fn typed_patch_recovers_values_from_dynamic_base() {
+            let mut app = test_app();
+            app.world_mut()
+                .resource_mut::<AppTypeRegistry>()
+                .write()
+                .register::<Position>();
+
+            let registry = app.world().resource::<AppTypeRegistry>().read();
+            let position = typed_patch_over_dynamic_base(&app, Some(&registry));
+
+            // `y` surviving is the point: the dynamic base's value was recovered, not discarded.
+            assert_eq!(
+                position,
+                Position {
+                    x: 1.,
+                    y: 2.,
+                    z: 0.
+                }
+            );
+        }
+
+        // 9 — C7 fallback (registry present, type unregistered).
+        #[test]
+        fn typed_patch_over_dynamic_base_falls_back_to_default_when_unregistered() {
+            let app = test_app();
+            let registry = TypeRegistry::empty();
+            let position = typed_patch_over_dynamic_base(&app, Some(&registry));
+
+            assert_eq!(
+                position,
+                Position {
+                    x: 1.,
+                    y: 0.,
+                    z: 0.
+                }
+            );
+        }
+
+        // 10 — C7 registry-`None` path.
+        #[test]
+        fn typed_patch_over_dynamic_base_with_no_registry() {
+            let app = test_app();
+            let position = typed_patch_over_dynamic_base(&app, None);
+
+            assert_eq!(
+                position,
+                Position {
+                    x: 1.,
+                    y: 0.,
+                    z: 0.
+                }
+            );
+        }
+
+        // 11 — C3.a
+        #[test]
+        fn related_resolved_scenes_new_erased_matches_new() {
+            let a = RelatedResolvedScenes::new::<ChildOf>();
+            let b = RelatedResolvedScenes::new_erased(
+                a.insert_relationship,
+                a.insert_relationship_target,
+                a.relationship_name,
+            );
+
+            assert!(b.scenes.is_empty());
+            assert_eq!(b.relationship_name, a.relationship_name);
+            assert!(core::ptr::fn_addr_eq(
+                a.insert_relationship,
+                b.insert_relationship
+            ));
+            assert!(core::ptr::fn_addr_eq(
+                a.insert_relationship_target,
+                b.insert_relationship_target
+            ));
+        }
+
+        // 12 — C5
+        #[test]
+        fn resolve_scene_error_messages_name_the_type() {
+            let type_path = || "my_crate::Foo".to_string();
+            let errors = [
+                ResolveSceneError::TypeNotRegistered {
+                    type_path: type_path(),
+                },
+                ResolveSceneError::TypeNotReflectable {
+                    type_path: type_path(),
+                },
+                ResolveSceneError::MissingReflectDefault {
+                    type_path: type_path(),
+                },
+                ResolveSceneError::MissingReflectComponent {
+                    type_path: type_path(),
+                },
+                ResolveSceneError::UnsupportedRelationship {
+                    type_path: type_path(),
+                },
+                ResolveSceneError::ApplyFailed {
+                    type_path: type_path(),
+                    error: ApplyError::MismatchedKinds {
+                        from_kind: ReflectKind::Struct,
+                        to_kind: ReflectKind::Enum,
+                    },
+                },
+                ResolveSceneError::UnpatchableTemplate {
+                    type_path: type_path(),
+                },
+            ];
+
+            for error in &errors {
+                assert!(
+                    format!("{error}").contains("my_crate::Foo"),
+                    "error message does not name the type: {error}"
+                );
+            }
+
+            assert!(format!("{}", errors[2]).contains("#[reflect(Default)]"));
+        }
+
+        /// Pushes a related scene carrying a `Name` template through the generic API.
+        fn push_static_child(scene: &mut ResolvedScene, name: &str) {
+            let mut child = ResolvedScene::default();
+            child.insert_template(Name::new(name.to_string()));
+            scene
+                .get_or_insert_related_resolved_scenes::<ChildOf>()
+                .scenes
+                .push(child);
+        }
+
+        /// Pushes a related scene carrying a `Name` template through the erased API.
+        fn push_erased_child(context: &ResolveContext, scene: &mut ResolvedScene, name: &str) {
+            let registry = context
+                .type_registry
+                .expect("resolve was driven with a TypeRegistry");
+            let data = registry
+                .get_type_data::<ReflectRelationshipTarget>(TypeId::of::<Children>())
+                .expect("`Children` is registered with `#[reflect(RelationshipTarget)]`");
+
+            let mut child = ResolvedScene::default();
+            child.insert_template(Name::new(name.to_string()));
+            scene
+                .get_or_insert_related_resolved_scenes_erased(data)
+                .scenes
+                .push(child);
+        }
+
+        fn app_with_children_registered() -> App {
+            let mut app = test_app();
+            app.world_mut()
+                .resource_mut::<AppTypeRegistry>()
+                .write()
+                .register::<Children>();
+            app
+        }
+
+        fn child_names(app: &App, root: Entity) -> Vec<String> {
+            let children = app.world().entity(root).get::<Children>().unwrap();
+            children
+                .iter()
+                .map(|child| {
+                    app.world()
+                        .entity(child)
+                        .get::<Name>()
+                        .unwrap()
+                        .as_str()
+                        .to_string()
+                })
+                .collect()
+        }
+
+        // 13 — C3.b
+        #[test]
+        fn dynamic_and_static_children_merge_into_one_relationship() {
+            let mut app = app_with_children_registered();
+            let id = spawn_scene_function(&mut app, |context, scene| {
+                push_static_child(scene, "static");
+                push_erased_child(context, scene, "dynamic");
+            });
+
+            assert_eq!(child_names(&app, id), ["static", "dynamic"]);
+        }
+
+        // 14 — C3.b
+        #[test]
+        fn erased_children_then_static_children_also_merge() {
+            let mut app = app_with_children_registered();
+            let id = spawn_scene_function(&mut app, |context, scene| {
+                push_erased_child(context, scene, "dynamic");
+                push_static_child(scene, "static");
+            });
+
+            assert_eq!(child_names(&app, id), ["dynamic", "static"]);
+        }
+    }
 }
