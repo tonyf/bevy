@@ -910,6 +910,8 @@ pub mod macro_utils;
 
 extern crate alloc;
 
+#[cfg(feature = "bsn_asset")]
+mod dynamic;
 mod resolved_scene;
 mod scene;
 mod scene_component;
@@ -918,6 +920,8 @@ mod scene_patch;
 mod spawn;
 mod spawn_system;
 
+#[cfg(feature = "bsn_asset")]
+pub use dynamic::*;
 pub use resolved_scene::*;
 pub use scene::*;
 pub use scene_component::*;

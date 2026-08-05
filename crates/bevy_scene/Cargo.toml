@@ -8,8 +8,16 @@ repository = "https://github.com/bevyengine/bevy"
 license = "MIT OR Apache-2.0"
 keywords = ["bevy"]
 
+[features]
+default = []
+
+## Enables the reflection-driven `.bsn` scene format: parsing (`bevy_bsn`) and the dynamic
+## `Scene` implementation built from a parsed document.
+bsn_asset = ["dep:bevy_bsn"]
+
 [dependencies]
 bevy_scene_macros = { path = "macros", version = "0.20.0-dev" }
+bevy_bsn = { path = "../bevy_bsn", version = "0.20.0-dev", optional = true }
 
 bevy_app = { path = "../bevy_app", version = "0.20.0-dev" }
 bevy_asset = { path = "../bevy_asset", version = "0.20.0-dev" }
