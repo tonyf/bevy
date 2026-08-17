@@ -1098,3 +1098,115 @@ impl SkipTemplate for () {
         false
     }
 }
+
+/// Focused tests for this module's `unsafe` surface, designed to run under Miri.
+///
+/// They deliberately use only a bare [`World`] — no assets, no task pools, no app — so
+/// that `cargo miri test -p bevy_scene --no-default-features unsafe_paths` stays fast.
+/// CI runs exactly that filter (see the `miri` job); everything here also runs as a
+/// normal test on every platform.
+#[cfg(test)]
+mod unsafe_paths {
+    use super::*;
+    use alloc::{boxed::Box, vec::Vec};
+    use bevy_ecs::{
+        component::Component,
+        hierarchy::{ChildOf, Children},
+        name::Name,
+        prelude::ReflectComponent,
+        reflect::ReflectRelationshipTarget,
+    };
+    use bevy_reflect::{prelude::ReflectDefault, Reflect};
+
+    #[derive(Component, Reflect, Clone, Default, PartialEq, Debug)]
+    #[reflect(Component, Default)]
+    struct Health(u32);
+
+    fn registry_with<T: bevy_reflect::GetTypeRegistration>() -> TypeRegistry {
+        let mut registry = TypeRegistry::empty();
+        registry.register::<T>();
+        registry
+    }
+
+    /// Shared and mutable `ReflectFromPtr` views of a typed template: the fat→thin
+    /// pointer casts in `erased_template_as_partial_reflect{,_mut}` are exactly what
+    /// Miri's provenance tracking is for.
+    #[test]
+    fn reflect_views_of_typed_template_are_sound() {
+        let registry = registry_with::<Health>();
+        let mut erased: Box<dyn ErasedComponentTemplate> = Box::new(Health(7));
+
+        let shared = erased_template_as_partial_reflect(&*erased, &registry)
+            .expect("registered template must be viewable");
+        assert_eq!(shared.try_downcast_ref::<Health>(), Some(&Health(7)));
+
+        let exclusive = erased_template_as_partial_reflect_mut(&mut *erased, &registry)
+            .expect("registered template must be viewable mutably");
+        *exclusive
+            .try_downcast_mut::<Health>()
+            .expect("concrete type") = Health(9);
+
+        let reread = erased_template_as_partial_reflect(&*erased, &registry).unwrap();
+        assert_eq!(reread.try_downcast_ref::<Health>(), Some(&Health(9)));
+    }
+
+    /// An unregistered template type must yield `None`, never a wild cast.
+    #[test]
+    fn reflect_view_of_unregistered_template_is_none() {
+        let registry = TypeRegistry::empty();
+        let erased: Box<dyn ErasedComponentTemplate> = Box::new(Health(1));
+        assert!(erased_template_as_partial_reflect(&*erased, &registry).is_none());
+    }
+
+    /// The erased relationship fn pointers write through a `BundleWriter` into a bare
+    /// `World`: exercises `push_component` + the recursive write path under Miri.
+    #[test]
+    fn erased_relationship_insertion_is_sound() {
+        let mut registry = TypeRegistry::empty();
+        registry.register::<Children>();
+        let data = registry
+            .get_type_data::<ReflectRelationshipTarget>(core::any::TypeId::of::<Children>())
+            .unwrap()
+            .clone();
+
+        let mut world = World::new();
+        let parent = world.spawn_empty().id();
+        let mut scratch = BundleScratch::default();
+        let mut writer = scratch.writer();
+        // SAFETY: `writer` and `components` come from the same `World`, and `writer`
+        // is written to `child` below, an entity of that same `World`.
+        let child = unsafe {
+            let mut components = world.components_registrator();
+            (data.insert_relationship)(&mut writer, &mut components, parent);
+            let mut child = world.spawn_empty();
+            writer.write(&mut child);
+            child.id()
+        };
+        assert_eq!(world.get::<ChildOf>(child).unwrap().parent(), parent);
+    }
+
+    /// A full erased apply through `ResolvedScene`: template + related child, applied
+    /// to a bare world, exercising `BundleScratch::manual_drop` bookkeeping too.
+    #[test]
+    fn resolved_scene_apply_is_sound_on_bare_world() {
+        let mut registry = TypeRegistry::empty();
+        registry.register::<Health>();
+        registry.register::<Children>();
+        registry.register::<Name>();
+
+        let mut world = World::new();
+        let mut scene = ResolvedScene::default();
+        // `Health` is `Clone + Default`, so it is its own `Template` and picks up the
+        // blanket `ErasedComponentTemplate` impl directly.
+        scene.push_template_erased(Box::new(Health(3)));
+
+        let root = ResolvedSceneRoot { scene };
+        let mut spawned: Vec<Entity> = Vec::new();
+        let mut entity = world.spawn_empty();
+        root.apply_recording(&mut entity, &mut BundleScratch::default(), &mut spawned)
+            .unwrap();
+        let id = entity.id();
+        assert_eq!(world.get::<Health>(id), Some(&Health(3)));
+        assert!(spawned.is_empty());
+    }
+}
