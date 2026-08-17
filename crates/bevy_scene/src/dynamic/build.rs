@@ -808,6 +808,195 @@ mod tests {
     }
 
     #[test]
+    fn resolve_symbol_variant_of_a_non_enum_errors() {
+        // `Marker` resolves, but it has no variants, so the whole path is simply unknown.
+        let error = symbol_of("Marker::Nope").unwrap_err();
+        assert!(
+            matches!(&error, DynamicSceneBuildError::UnknownType { type_path, .. }
+                if type_path == "Marker::Nope"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn every_error_variant_reports_its_span() {
+        // The asset loader turns `span()` into the line/column of every diagnostic, so a variant
+        // that forgets to report its span silently points at the top of the file.
+        let span = Span::new(3, 7);
+        let type_path = "some::Type".to_string();
+        let errors = [
+            DynamicSceneBuildError::UnknownType {
+                type_path: type_path.clone(),
+                span,
+            },
+            DynamicSceneBuildError::TypeNotRegistered {
+                type_path: type_path.clone(),
+                span,
+            },
+            DynamicSceneBuildError::MissingReflectDefault {
+                type_path: type_path.clone(),
+                span,
+            },
+            DynamicSceneBuildError::MissingReflectComponent {
+                type_path: type_path.clone(),
+                span,
+            },
+            DynamicSceneBuildError::UnknownVariant {
+                type_path: type_path.clone(),
+                variant: "V".to_string(),
+                span,
+            },
+            DynamicSceneBuildError::TypeNotStruct {
+                type_path: type_path.clone(),
+                span,
+            },
+            DynamicSceneBuildError::TypeNotTupleStruct {
+                type_path: type_path.clone(),
+                span,
+            },
+            DynamicSceneBuildError::UnknownField {
+                type_path: type_path.clone(),
+                field: "f".to_string(),
+                span,
+            },
+            DynamicSceneBuildError::DuplicateField {
+                type_path: type_path.clone(),
+                field: "f".to_string(),
+                span,
+            },
+            DynamicSceneBuildError::TooManyTupleFields {
+                type_path: type_path.clone(),
+                given: 2,
+                expected: 1,
+                span,
+            },
+            DynamicSceneBuildError::IntegerOutOfRange {
+                value: 300,
+                type_path: type_path.clone(),
+                span,
+            },
+            DynamicSceneBuildError::LiteralNotRepresentable {
+                value: 300,
+                type_path: type_path.clone(),
+                span,
+            },
+            DynamicSceneBuildError::ValueTypeMismatch {
+                found: "u32".to_string(),
+                expected: type_path.clone(),
+                span,
+            },
+            DynamicSceneBuildError::ValueApplyFailed {
+                type_path: type_path.clone(),
+                error: "why".to_string(),
+                span,
+            },
+            DynamicSceneBuildError::UnsupportedRelationship {
+                type_path: type_path.clone(),
+                span,
+            },
+            DynamicSceneBuildError::SceneComponentUnsupported {
+                type_path: type_path.clone(),
+                span,
+            },
+            DynamicSceneBuildError::UnknownEntityName {
+                name: "N".to_string(),
+                span,
+            },
+            DynamicSceneBuildError::InvalidAssetPath {
+                path: "p".to_string(),
+                span,
+            },
+            DynamicSceneBuildError::MultipleRoots { count: 2, span },
+            DynamicSceneBuildError::MalformedDocument {
+                message: "why".to_string(),
+                span,
+            },
+        ];
+
+        let source = "0123456789";
+        for error in errors {
+            assert_eq!(error.span(), span, "{error:?}");
+            // `render` prefixes the 1-based line and column of that span.
+            assert!(
+                error.render(source).starts_with("1:4: "),
+                "unexpected rendering: {}",
+                error.render(source)
+            );
+        }
+    }
+
+    #[test]
+    fn unregistered_field_type_errors() {
+        // A registry that knows a component but not one of its field types is a build error, not
+        // a panic.
+        let registry = TypeRegistry::empty();
+        let document = BsnDocument::new();
+        let cx = BuildCx::new(&registry, &document, "test.bsn");
+        let error = cx
+            .registration(TypeId::of::<u32>(), "u32", Span::NONE)
+            .unwrap_err();
+        assert!(
+            matches!(&error, DynamicSceneBuildError::TypeNotRegistered { type_path, .. }
+                if type_path == "u32"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn template_registration_needs_both_ends_registered() {
+        // `~SpriteTemplate` needs the component the template builds…
+        let mut registry = TypeRegistry::empty();
+        registry.register::<SpriteTemplate>();
+        let named = registry
+            .get(TypeId::of::<SpriteTemplate>())
+            .expect("just registered");
+        let error = template_registration(&registry, named, BsnPatchPrefix::Template, Span::NONE)
+            .unwrap_err();
+        assert!(
+            matches!(&error, DynamicSceneBuildError::TypeNotRegistered { type_path, .. }
+                if type_path.contains("as Template>::Output")),
+            "unexpected error: {error}"
+        );
+
+        // …and `Sprite` needs the template type it is built from.
+        let mut registry = TypeRegistry::empty();
+        registry.register::<Sprite>();
+        let named = registry
+            .get(TypeId::of::<Sprite>())
+            .expect("just registered");
+        let error =
+            template_registration(&registry, named, BsnPatchPrefix::FromTemplate, Span::NONE)
+                .unwrap_err();
+        assert!(
+            matches!(&error, DynamicSceneBuildError::TypeNotRegistered { type_path, .. }
+                if type_path.ends_with("SpriteTemplate")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn template_without_reflect_default_errors() {
+        // `Tricky` is registered with `#[reflect(Component)]` but no `Default`, so its template
+        // value cannot be constructed.
+        let error = try_build("Tricky::B").unwrap_err();
+        assert!(
+            matches!(&error, DynamicSceneBuildError::MissingReflectDefault { type_path, .. }
+                if type_path.ends_with("Tricky")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn malformed_base_asset_path_errors() {
+        let error = try_build(":\"bad#source://x.png\"\nMarker").unwrap_err();
+        assert!(
+            matches!(&error, DynamicSceneBuildError::InvalidAssetPath { path, .. }
+                if path == "bad#source://x.png"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn template_type_id_uses_reflect_from_template() {
         let scene = build(r#"Sprite("a.png")"#);
         assert_eq!(
@@ -1045,6 +1234,49 @@ mod tests {
         });
         document.push_root(root);
         assert!(DynamicScene::from_document(&document, "test.bsn", &registry).is_err());
+
+        // An entity whose relation list points at an entity rather than a relation.
+        let mut document = BsnDocument::new();
+        let inner = document.push_node(BsnNodeKind::Entity {
+            name: None,
+            name_span: None,
+            base: None,
+            base_span: None,
+            patches: Vec::new(),
+            relations: Vec::new(),
+        });
+        let root = document.push_node(BsnNodeKind::Entity {
+            name: None,
+            name_span: None,
+            base: None,
+            base_span: None,
+            patches: Vec::new(),
+            relations: vec![inner],
+        });
+        document.push_root(root);
+        assert!(DynamicScene::from_document(&document, "test.bsn", &registry).is_err());
+
+        // An enum-variant patch whose value is a bare literal.
+        let mut document = BsnDocument::new();
+        let value = document.push_value(BsnValue::Int(1));
+        let patch = document.push_node(BsnNodeKind::Patch {
+            symbol: BsnPath::from_segments(["Choice", "Qux"]),
+            prefix: BsnPatchPrefix::FromTemplate,
+            value,
+        });
+        let root = document.push_node(BsnNodeKind::Entity {
+            name: None,
+            name_span: None,
+            base: None,
+            base_span: None,
+            patches: vec![patch],
+            relations: Vec::new(),
+        });
+        document.push_root(root);
+        assert!(matches!(
+            DynamicScene::from_document(&document, "test.bsn", &registry),
+            Err(DynamicSceneBuildError::MalformedDocument { .. })
+        ));
 
         // An extreme integer literal.
         assert!(matches!(

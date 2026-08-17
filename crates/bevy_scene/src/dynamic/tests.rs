@@ -806,9 +806,39 @@ fn dynamic_late_base_errors() {
 }
 
 #[test]
+fn dynamic_child_with_a_missing_base_errors() {
+    // A failure inside a relation block has to propagate out of the whole resolve, not be
+    // swallowed by the loop that restores `context.cached`.
+    let mut app = test_app();
+    let b = scene(
+        &app,
+        "b.bsn",
+        "Children [ (:\"missing.bsn\" Marker), (Marker) ]",
+    );
+
+    let world = app.world_mut();
+    let Err(error) = world.spawn_scene(b) else {
+        panic!("resolving a child whose base has not loaded must fail");
+    };
+    assert!(
+        format!("{error}").contains("missing.bsn"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn dynamic_scene_is_clone_send_sync_and_scene() {
     fn assert_scene<S: Scene + Clone + Send + Sync + 'static>() {}
     assert_scene::<DynamicScene>();
+
+    // The `Debug` impl names the source asset, which is what makes a scene identifiable in a log.
+    let app = test_app();
+    let text = format!("{:?}", scene(&app, "a.bsn", r#"Sprite("image.png")"#));
+    assert!(text.contains("a.bsn"), "unexpected debug output: {text}");
+    assert!(
+        text.contains("dependencies"),
+        "unexpected debug output: {text}"
+    );
 }
 
 /// An [`App`] whose asset source contains an `a.bsn` that loads as a dynamic scene.

@@ -763,6 +763,23 @@ mod tests {
     }
 
     #[test]
+    fn unit_value_only_fits_the_unit_type() {
+        let (document, id) = value_doc(BsnValue::Unit);
+        with_cx(&document, |cx| {
+            assert!(build_value(cx, id, reg::<()>(cx))
+                .unwrap()
+                .try_downcast_ref::<()>()
+                .is_some());
+            let error = build_value(cx, id, reg::<u32>(cx)).unwrap_err();
+            assert!(
+                matches!(&error, DynamicSceneBuildError::ValueTypeMismatch { found, .. }
+                    if found == "()"),
+                "unexpected error: {error}"
+            );
+        });
+    }
+
+    #[test]
     fn int_literal_exact_widths() {
         let (document, id) = value_doc(BsnValue::Int(1));
         with_cx(&document, |cx| {
@@ -825,6 +842,21 @@ mod tests {
     }
 
     #[test]
+    fn int_literal_beyond_i64_keeps_its_natural_type() {
+        // A literal that does not fit an `i64` is offered to a registered conversion as an `i128`,
+        // so the failure names the type an author would expect.
+        let (document, id) = value_doc(BsnValue::Int(i128::from(u64::MAX) + 1));
+        with_cx(&document, |cx| {
+            let error = build_value(cx, id, reg::<Marker>(cx)).unwrap_err();
+            assert!(
+                matches!(&error, DynamicSceneBuildError::ValueTypeMismatch { found, .. }
+                    if found == "i128"),
+                "unexpected error: {error}"
+            );
+        });
+    }
+
+    #[test]
     fn float_literal_into_f32_and_f64() {
         let (document, id) = value_doc(BsnValue::Float(1.5));
         with_cx(&document, |cx| {
@@ -853,6 +885,23 @@ mod tests {
                     .unwrap(),
                 1.1f32
             );
+        });
+    }
+
+    #[test]
+    fn float_literal_overflowing_f32_errors() {
+        // Rounding an `f64` literal to `f32` is fine, but rounding a finite value to infinity is
+        // not: that is a value the author cannot have meant.
+        let (document, id) = value_doc(BsnValue::Float(1e39));
+        with_cx(&document, |cx| {
+            let error = build_value(cx, id, reg::<f32>(cx)).unwrap_err();
+            assert!(
+                matches!(&error, DynamicSceneBuildError::ValueTypeMismatch { found, .. }
+                    if found == "f64"),
+                "unexpected error: {error}"
+            );
+            // The same literal is fine as an `f64`.
+            assert!(build_value(cx, id, reg::<f64>(cx)).is_ok());
         });
     }
 
@@ -1096,6 +1145,136 @@ mod tests {
     }
 
     #[test]
+    fn struct_body_on_a_tuple_struct_errors() {
+        let mut document = BsnDocument::new();
+        let one = document.push_value(BsnValue::Int(1));
+        let id = document.push_value(BsnValue::Struct(
+            BsnPath::from_segments(["Bar"]),
+            vec![("x".to_string(), one)],
+        ));
+        with_cx(&document, |cx| {
+            let error = build_value(cx, id, reg::<Bar>(cx)).unwrap_err();
+            assert!(
+                matches!(&error, DynamicSceneBuildError::TypeNotStruct { type_path, .. }
+                    if type_path.ends_with("Bar")),
+                "unexpected error: {error}"
+            );
+        });
+    }
+
+    #[test]
+    fn enum_forms_reject_non_enums_and_unknown_variants() {
+        // Both guards protect against a component and its generated template disagreeing about
+        // their shape; neither is reachable from a document built against a matching registry.
+        let document = BsnDocument::new();
+        with_cx(&document, |cx| {
+            let error = build_enum_forms(cx, reg::<Foo>(cx), "Bar", EnumInput::Unit, Span::NONE)
+                .unwrap_err();
+            assert!(
+                matches!(&error, DynamicSceneBuildError::UnknownVariant { type_path, .. }
+                    if type_path.ends_with("Foo")),
+                "unexpected error: {error}"
+            );
+
+            let error =
+                build_enum_forms(cx, reg::<Choice>(cx), "Nope", EnumInput::Unit, Span::NONE)
+                    .unwrap_err();
+            assert!(
+                matches!(&error, DynamicSceneBuildError::UnknownVariant { variant, .. }
+                    if variant == "Nope"),
+                "unexpected error: {error}"
+            );
+        });
+    }
+
+    #[test]
+    fn enum_variant_body_shape_mismatches_error() {
+        let mut document = BsnDocument::new();
+        let one = document.push_value(BsnValue::Int(1));
+        // `Choice::Bar` is a struct variant, written with positional fields.
+        let tuple_on_struct = document.push_value(BsnValue::NamedTuple(
+            BsnPath::from_segments(["Choice", "Bar"]),
+            vec![one],
+        ));
+        // `Choice::Baz` is a tuple variant, written with named fields.
+        let named_on_tuple = document.push_value(BsnValue::Struct(
+            BsnPath::from_segments(["Choice", "Baz"]),
+            vec![("x".to_string(), one)],
+        ));
+        // More positional values than `Choice::Baz` has fields.
+        let too_many = document.push_value(BsnValue::NamedTuple(
+            BsnPath::from_segments(["Choice", "Baz"]),
+            vec![one, one],
+        ));
+        // A body on the unit variant `Choice::Qux`.
+        let body_on_unit = document.push_value(BsnValue::NamedTuple(
+            BsnPath::from_segments(["Choice", "Qux"]),
+            vec![one],
+        ));
+
+        with_cx(&document, |cx| {
+            let error = build_value(cx, tuple_on_struct, reg::<Choice>(cx)).unwrap_err();
+            assert!(
+                matches!(&error, DynamicSceneBuildError::TypeNotTupleStruct { type_path, .. }
+                    if type_path.ends_with("Choice::Bar")),
+                "unexpected error: {error}"
+            );
+
+            let error = build_value(cx, named_on_tuple, reg::<Choice>(cx)).unwrap_err();
+            assert!(
+                matches!(&error, DynamicSceneBuildError::TypeNotStruct { type_path, .. }
+                    if type_path.ends_with("Choice::Baz")),
+                "unexpected error: {error}"
+            );
+
+            assert!(matches!(
+                build_value(cx, too_many, reg::<Choice>(cx)),
+                Err(DynamicSceneBuildError::TooManyTupleFields {
+                    given: 2,
+                    expected: 1,
+                    ..
+                })
+            ));
+
+            assert!(matches!(
+                build_value(cx, body_on_unit, reg::<Choice>(cx)),
+                Err(DynamicSceneBuildError::TooManyTupleFields { expected: 0, .. })
+            ));
+        });
+    }
+
+    #[test]
+    fn enum_variant_field_name_errors() {
+        let mut document = BsnDocument::new();
+        let one = document.push_value(BsnValue::Int(1));
+        let two = document.push_value(BsnValue::Int(2));
+        let unknown = document.push_value(BsnValue::Struct(
+            BsnPath::from_segments(["Choice", "Bar"]),
+            vec![("nope".to_string(), one)],
+        ));
+        let duplicate = document.push_value(BsnValue::Struct(
+            BsnPath::from_segments(["Choice", "Bar"]),
+            vec![("x".to_string(), one), ("x".to_string(), two)],
+        ));
+
+        with_cx(&document, |cx| {
+            let error = build_value(cx, unknown, reg::<Choice>(cx)).unwrap_err();
+            assert!(
+                matches!(&error, DynamicSceneBuildError::UnknownField { type_path, field, .. }
+                    if type_path.ends_with("Choice::Bar") && field == "nope"),
+                "unexpected error: {error}"
+            );
+
+            let error = build_value(cx, duplicate, reg::<Choice>(cx)).unwrap_err();
+            assert!(
+                matches!(&error, DynamicSceneBuildError::DuplicateField { type_path, field, .. }
+                    if type_path.ends_with("Choice::Bar") && field == "x"),
+                "unexpected error: {error}"
+            );
+        });
+    }
+
+    #[test]
     fn enum_struct_variant_fills_defaults() {
         let mut document = BsnDocument::new();
         let one = document.push_value(BsnValue::Int(1));
@@ -1149,6 +1328,29 @@ mod tests {
     }
 
     #[test]
+    fn enum_variant_without_a_body_fills_defaults() {
+        // `Choice::Bar` and `Choice::Baz` name a variant with no body at all, which selects the
+        // variant with every field defaulted.
+        let mut document = BsnDocument::new();
+        let struct_variant =
+            document.push_value(BsnValue::Path(BsnPath::from_segments(["Choice", "Bar"])));
+        let tuple_variant =
+            document.push_value(BsnValue::Path(BsnPath::from_segments(["Choice", "Baz"])));
+
+        with_cx(&document, |cx| {
+            let value = build_value(cx, struct_variant, reg::<Choice>(cx)).unwrap();
+            let mut target = Choice::Qux;
+            target.try_apply(&*value).unwrap();
+            assert_eq!(target, Choice::Bar { x: 0, y: 0, z: 0 });
+
+            let value = build_value(cx, tuple_variant, reg::<Choice>(cx)).unwrap();
+            let mut target = Choice::Qux;
+            target.try_apply(&*value).unwrap();
+            assert_eq!(target, Choice::Baz(0));
+        });
+    }
+
+    #[test]
     fn enum_variant_field_missing_reflect_default_errors() {
         let mut document = BsnDocument::new();
         let one = document.push_value(BsnValue::Int(1));
@@ -1194,6 +1396,51 @@ mod tests {
         });
     }
 
+    /// An `Option` lookalike whose `None` carries a field.
+    #[derive(Reflect, Clone, PartialEq, Debug)]
+    enum NoneIsNotUnit {
+        None(u32),
+        Some(u32),
+    }
+
+    /// An `Option` lookalike whose `Some` is a struct variant.
+    #[derive(Reflect, Clone, PartialEq, Debug)]
+    enum SomeIsNotATuple {
+        None,
+        Some { value: u32 },
+    }
+
+    /// An `Option` lookalike whose `Some` carries two fields.
+    #[derive(Reflect, Clone, PartialEq, Debug)]
+    enum SomeTakesTwo {
+        None,
+        Some(u32, u32),
+    }
+
+    #[test]
+    fn implicit_some_only_applies_to_option_shaped_enums() {
+        let (document, id) = value_doc(BsnValue::Int(5));
+        let mut registry = test_registry();
+        registry.register::<NoneIsNotUnit>();
+        registry.register::<SomeIsNotATuple>();
+        registry.register::<SomeTakesTwo>();
+        let mut cx = BuildCx::new(&registry, &document, "test.bsn");
+
+        macro_rules! check {
+            ($($ty:ty),*) => {$({
+                let expected = reg::<$ty>(&cx);
+                let error = build_value(&mut cx, id, expected).unwrap_err();
+                assert!(
+                    matches!(&error, DynamicSceneBuildError::ValueTypeMismatch { .. }),
+                    "{}: unexpected error: {error}",
+                    core::any::type_name::<$ty>()
+                );
+            })*};
+        }
+        // Three variants; `None` with a field; `Some` as a struct variant; `Some` with two fields.
+        check!(Choice, NoneIsNotUnit, SomeIsNotATuple, SomeTakesTwo);
+    }
+
     #[test]
     fn option_field_explicit_some() {
         let mut document = BsnDocument::new();
@@ -1232,6 +1479,66 @@ mod tests {
     }
 
     #[test]
+    fn tuple_value_into_a_tuple_destination() {
+        let mut document = BsnDocument::new();
+        let one = document.push_value(BsnValue::Int(1));
+        let pair = document.push_value(BsnValue::Tuple(vec![one, one]));
+        let triple = document.push_value(BsnValue::Tuple(vec![one, one, one]));
+
+        // `(u32, f32)` is only registered as a field type of a fixture component, so the bare
+        // fixture registry needs it added.
+        let mut registry = test_registry();
+        registry.register::<(u32, f32)>();
+        let mut cx = BuildCx::new(&registry, &document, "test.bsn");
+        let expected = reg::<(u32, f32)>(&cx);
+
+        let value = build_value(&mut cx, pair, expected).unwrap();
+        let mut target = (0u32, 0f32);
+        target.try_apply(&*value).unwrap();
+        assert_eq!(target, (1, 1.0));
+
+        assert!(matches!(
+            build_value(&mut cx, triple, expected),
+            Err(DynamicSceneBuildError::TooManyTupleFields {
+                given: 3,
+                expected: 2,
+                ..
+            })
+        ));
+
+        // A tuple written where a scalar was expected.
+        let scalar = reg::<u32>(&cx);
+        let error = build_value(&mut cx, pair, scalar).unwrap_err();
+        assert!(
+            matches!(&error, DynamicSceneBuildError::ValueTypeMismatch { found, .. }
+                if found == "a tuple"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// A single-field tuple struct wrapping a list — the shape a `#[template(built_in)]` `Vec`
+    /// field's `VecTemplate<T>` has.
+    #[derive(Reflect, Clone, Default, PartialEq, Debug)]
+    #[reflect(Default)]
+    struct ListWrapper(Vec<u8>);
+
+    #[test]
+    fn list_into_a_list_wrapping_tuple_struct() {
+        let mut document = BsnDocument::new();
+        let one = document.push_value(BsnValue::Int(1));
+        let two = document.push_value(BsnValue::Int(2));
+        let id = document.push_value(BsnValue::List(vec![one, two]));
+
+        let mut registry = test_registry();
+        registry.register::<ListWrapper>();
+        let mut cx = BuildCx::new(&registry, &document, "test.bsn");
+        let expected = reg::<ListWrapper>(&cx);
+
+        let value = build_value(&mut cx, id, expected).unwrap();
+        assert_eq!(applied::<ListWrapper>(&*value), ListWrapper(vec![1, 2]));
+    }
+
+    #[test]
     fn list_item_type_mismatch_errors() {
         let mut document = BsnDocument::new();
         let text = document.push_value(BsnValue::String("a".to_string()));
@@ -1264,6 +1571,31 @@ mod tests {
             let expected = SceneEntityReference::from_asset("test.bsn", root.0);
             assert!(
                 matches!(template, EntityTemplate::SceneEntityReference(reference) if *reference == expected)
+            );
+        });
+    }
+
+    #[test]
+    fn entity_ref_into_a_foreign_type_errors() {
+        let mut document = BsnDocument::new();
+        let root = document.push_node(BsnNodeKind::Entity {
+            name: Some("Root".to_string()),
+            name_span: None,
+            base: None,
+            base_span: None,
+            patches: Vec::new(),
+            relations: Vec::new(),
+        });
+        document.push_root(root);
+        let id = document.push_value(BsnValue::EntityRef("Root".to_string()));
+
+        with_cx(&document, |cx| {
+            // A destination that is neither an `EntityTemplate` nor convertible from one.
+            let error = build_value(cx, id, reg::<u32>(cx)).unwrap_err();
+            assert!(
+                matches!(&error, DynamicSceneBuildError::ValueTypeMismatch { expected, .. }
+                    if expected == "u32"),
+                "unexpected error: {error}"
             );
         });
     }

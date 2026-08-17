@@ -408,11 +408,13 @@ fn lex_leading_dot_is_not_float() {
 
 #[test]
 fn lex_string_table() {
-    let table: [(&str, &str); 6] = [
+    let table: [(&str, &str); 8] = [
         ("\"a\"", "a"),
         ("\"a\\nb\"", "a\nb"),
         ("\"\\u{1F600}\"", "\u{1F600}"),
         ("\"\\x41\"", "A"),
+        ("\"\\'\"", "'"),
+        ("\"\\\\\\\"\\r\\t\\0\"", "\\\"\r\t\0"),
         ("r\"a\\b\"", "a\\b"),
         ("r#\"a\"b\"#", "a\"b"),
     ];
@@ -439,6 +441,34 @@ fn lex_string_errors() {
         lex_spanned("r#\"x\""),
         vec![(TokenKind::Error(LexError::UnterminatedRawString), 0, 5)]
     );
+}
+
+#[test]
+fn decode_string_rejects_malformed_escapes() {
+    // The lexer rejects every one of these before the parser can reach the decoder, but
+    // `decode_string` is public API: a consumer that decodes a span of its own must get an error
+    // rather than a panic or a silently mangled string.
+    let table = [
+        "\"\\\"",          // a backslash with nothing after it
+        "\"\\q\"",         // an unknown escape
+        "\"\\xzz\"",       // `\x` without hex digits
+        "\"\\x4\"",        // `\x` with only one digit
+        "\"\\uABCD\"",     // `\u` without a brace
+        "\"\\u{zz}\"",     // `\u{…}` with a non-hex digit
+        "\"\\u{41\"",      // `\u{…}` left unclosed
+        "\"\\u{D800}\"",   // a surrogate, which is not a `char`
+        "\"\\u{110000}\"", // past the last code point
+    ];
+    for source in table {
+        let span = Span::new(0, source.len() as u32);
+        let error = decode_string(source, span).expect_err("decoding should fail");
+        assert!(
+            matches!(error.kind, BsnParseErrorKind::InvalidEscape),
+            "decoding {source:?} produced {:?}",
+            error.kind
+        );
+        assert_eq!(error.span, span, "decoding {source:?}");
+    }
 }
 
 #[test]
@@ -692,6 +722,94 @@ fn structural_eq_compares_floats_by_bits() {
     let mut negative_zero = left.clone();
     negative_zero.values[0].value = BsnValue::Float(-0.0);
     assert!(!different.structural_eq(&negative_zero), "0.0 != -0.0");
+}
+
+#[test]
+fn document_helpers_match_the_free_functions() {
+    let document = BsnDocument::parse(CORPUS_2).expect("the corpus parses");
+    assert_eq!(document.to_bsn_string(), print_document(&document));
+    assert!(document.structural_eq(&parse(CORPUS_2).unwrap()));
+}
+
+#[test]
+fn structural_eq_rejects_mismatched_documents() {
+    /// A document holding one root entity with a single `A` patch whose value is `value`.
+    fn document_with(value: BsnValue) -> BsnDocument {
+        let mut document = BsnDocument::new();
+        let value = document.push_value(value);
+        let patch = document.push_node(BsnNodeKind::Patch {
+            symbol: BsnPath::from_segments(["A"]),
+            prefix: BsnPatchPrefix::FromTemplate,
+            value,
+        });
+        let root = document.push_node(entity(vec![patch], vec![]));
+        document.push_root(root);
+        document
+    }
+
+    let left = document_with(BsnValue::Int(1));
+    assert!(left.structural_eq(&document_with(BsnValue::Int(1))));
+
+    // A different number of roots.
+    assert!(!left.structural_eq(&BsnDocument::new()));
+
+    // A root of a different kind.
+    let mut patch_root = BsnDocument::new();
+    let only = patch_root.push_patch(
+        BsnPatchPrefix::FromTemplate,
+        BsnPath::from_segments(["A"]),
+        PatchBody::Unit,
+    );
+    patch_root.push_root(only);
+    assert!(!patch_root.structural_eq(&left));
+
+    // A value of a different kind.
+    assert!(!left.structural_eq(&document_with(BsnValue::String("1".to_string()))));
+
+    // A dangling node id.
+    let mut dangling_node = BsnDocument::new();
+    dangling_node.push_root(BsnNodeId(9));
+    assert!(!dangling_node.structural_eq(&left));
+
+    // A dangling value id.
+    let mut dangling_value = left.clone();
+    let BsnNodeKind::Patch { value, .. } = &mut dangling_value.nodes[0].kind else {
+        panic!("the first node is the patch");
+    };
+    *value = BsnValueId(9);
+    assert!(!left.structural_eq(&dangling_value));
+}
+
+#[test]
+fn structural_eq_stops_on_cycles_and_over_deep_documents() {
+    // Comparing two hand-built documents has to terminate even when they are cyclic or nested
+    // deeper than the walk guard; the comparison gives up and reports "not equal".
+    let mut cyclic = BsnDocument::new();
+    let relation = cyclic.push_node(BsnNodeKind::Relation {
+        target_symbol: BsnPath::from_segments(["Children"]),
+        entities: Vec::new(),
+    });
+    let root = cyclic.push_node(entity(vec![], vec![relation]));
+    cyclic.nodes[relation.0 as usize].kind = BsnNodeKind::Relation {
+        target_symbol: BsnPath::from_segments(["Children"]),
+        entities: vec![root],
+    };
+    cyclic.push_root(root);
+    assert!(!cyclic.structural_eq(&cyclic.clone()));
+
+    let mut deep = BsnDocument::new();
+    let mut value = deep.push_value(BsnValue::Int(1));
+    for _ in 0..=MAX_WALK_DEPTH {
+        value = deep.push_value(BsnValue::List(vec![value]));
+    }
+    let patch = deep.push_node(BsnNodeKind::Patch {
+        symbol: BsnPath::from_segments(["A"]),
+        prefix: BsnPatchPrefix::FromTemplate,
+        value,
+    });
+    let root = deep.push_node(entity(vec![patch], vec![]));
+    deep.push_root(root);
+    assert!(!deep.structural_eq(&deep.clone()));
 }
 
 /// Builds an `Entity` node kind with no name and no base.
@@ -1067,6 +1185,57 @@ fn print_never_panics_on_dangling_id() {
     let root = document.push_node(entity(vec![BsnNodeId(42)], vec![]));
     document.push_root(root);
     assert!(print_document(&document).contains("/* <invalid node id 42> */"));
+}
+
+#[test]
+fn print_stops_on_cycles_and_over_deep_documents() {
+    const TOO_DEEP: &str = "/* <nesting too deep> */";
+    let children = || BsnPath::from_segments(["Children"]);
+
+    // An entity whose relation block contains the entity itself.
+    let mut document = BsnDocument::new();
+    let relation = document.push_node(BsnNodeKind::Relation {
+        target_symbol: children(),
+        entities: Vec::new(),
+    });
+    let root = document.push_node(entity(vec![], vec![relation]));
+    document.nodes[relation.0 as usize].kind = BsnNodeKind::Relation {
+        target_symbol: children(),
+        entities: vec![root],
+    };
+    document.push_root(root);
+    let text = print_document(&document);
+    assert!(text.contains(TOO_DEEP), "{text}");
+
+    // A chain of entities nested deeper than the walk guard.
+    let mut document = BsnDocument::new();
+    let mut node = document.push_node(entity(vec![], vec![]));
+    for _ in 0..=MAX_WALK_DEPTH {
+        let relation = document.push_node(BsnNodeKind::Relation {
+            target_symbol: children(),
+            entities: vec![node],
+        });
+        node = document.push_node(entity(vec![], vec![relation]));
+    }
+    document.push_root(node);
+    let text = print_document(&document);
+    assert!(text.contains(TOO_DEEP), "the entity walk must stop");
+
+    // A chain of values nested deeper than the walk guard.
+    let mut document = BsnDocument::new();
+    let mut value = document.push_value(BsnValue::Int(1));
+    for _ in 0..=MAX_WALK_DEPTH {
+        value = document.push_value(BsnValue::List(vec![value]));
+    }
+    let patch = document.push_node(BsnNodeKind::Patch {
+        symbol: BsnPath::from_segments(["A"]),
+        prefix: BsnPatchPrefix::FromTemplate,
+        value,
+    });
+    let root = document.push_node(entity(vec![patch], vec![]));
+    document.push_root(root);
+    let text = print_document(&document);
+    assert!(text.contains(TOO_DEEP), "the value walk must stop");
 }
 
 #[test]
