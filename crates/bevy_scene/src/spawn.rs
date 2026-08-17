@@ -1102,33 +1102,17 @@ impl QueuedScenes {
 #[cfg(test)]
 mod tests {
     use super::{EntityCommandsSceneExt, EntityWorldMutSceneExt, WorldSceneExt};
-    use crate::ScenePlugin;
+    use crate::test_support::{memory_asset_app, run_app_until, test_app};
     use crate::{
         self as bevy_scene, bsn, Scene, SceneInstanceState, ScenePatch, ScenePatchInstance,
     };
     use alloc::sync::Arc;
-    use bevy_app::{App, Last, TaskPoolPlugin};
-    use bevy_asset::{
-        io::{
-            memory::{Dir, MemoryAssetReader},
-            AssetSourceBuilder, AssetSourceId,
-        },
-        AssetApp, AssetEvent, AssetLoader, AssetPlugin, AssetServer, Assets, Handle,
-    };
+    use bevy_app::{App, Last};
+    use bevy_asset::{AssetApp, AssetEvent, AssetLoader, AssetServer, Assets, Handle};
     use bevy_ecs::{name::Name, prelude::*, template::FromTemplate};
     use bevy_platform::collections::HashMap;
     use bevy_reflect::TypePath;
     use std::{path::Path, sync::Mutex};
-
-    fn test_app() -> App {
-        let mut app = App::new();
-        app.add_plugins((
-            TaskPoolPlugin::default(),
-            AssetPlugin::default(),
-            ScenePlugin,
-        ));
-        app
-    }
 
     #[derive(Component, Default, FromTemplate)]
     struct SceneChild;
@@ -1284,22 +1268,7 @@ mod tests {
     /// path the test will load: the asset source has to have *something* at that path, even
     /// though the fake loader ignores the bytes.
     fn hot_reload_app(scenes: &FakeScenes, files: &[&str]) -> App {
-        let mut app = App::new();
-        let dir = Dir::default();
-        let reader_dir = dir.clone();
-        app.register_asset_source(
-            AssetSourceId::Default,
-            AssetSourceBuilder::new(move || {
-                Box::new(MemoryAssetReader {
-                    root: reader_dir.clone(),
-                })
-            }),
-        );
-        app.add_plugins((
-            TaskPoolPlugin::default(),
-            AssetPlugin::default(),
-            ScenePlugin,
-        ));
+        let (mut app, dir) = memory_asset_app();
         app.finish();
         app.cleanup();
         app.register_asset_loader(FakeSceneLoader(scenes.clone()));
@@ -1307,19 +1276,6 @@ mod tests {
             dir.insert_asset_text(Path::new(file), "");
         }
         app
-    }
-
-    /// Pumps `app` until `predicate` holds, or panics. The bound turns "never reloads" into a
-    /// test failure instead of a hang.
-    fn run_app_until(app: &mut App, mut predicate: impl FnMut(&mut App) -> bool) {
-        const MAX_FRAMES: usize = 1000;
-        for _ in 0..MAX_FRAMES {
-            app.update();
-            if predicate(app) {
-                return;
-            }
-        }
-        panic!("the app never reached the expected state");
     }
 
     /// Loads `path` and pumps until it has been resolved.
@@ -1800,13 +1756,13 @@ mod tests {
     #[derive(Component, FromTemplate)]
     struct Reference(Entity);
 
-    /// ADV-1: `queue_apply_scene` twice on the same entity.
+    /// ADV-1 (fixed): `queue_apply_scene` twice on the same entity replaces the instance.
     ///
-    /// D-7 replaced the manual `QueuedScenes` push with `entity.insert(ScenePatchInstance(..))`.
-    /// Inserting over an existing component does not fire `Add`, so the observer never runs and
-    /// the second scene is silently dropped.
+    /// The observer watches `Insert` (not `Add`), so replacing `ScenePatchInstance` re-queues:
+    /// the second scene applies. It used to be silently dropped, leaving the recorded state
+    /// describing a different asset than the handle.
     #[test]
-    fn adv1_queue_apply_scene_twice() {
+    fn adv1_queue_apply_scene_twice_replaces_the_instance() {
         let mut app = test_app();
         let root = app.world_mut().spawn_empty().id();
         app.world_mut()
@@ -1828,8 +1784,9 @@ mod tests {
         );
     }
 
-    /// ADV-1b: the realistic composition — spawn an entity from one scene, then queue a second
-    /// scene onto it. The second is silently dropped for the same reason.
+    /// ADV-1b (fixed): the realistic composition — spawn an entity from one scene, then queue a
+    /// second scene onto it. The second replaces the instance (components merge; the first
+    /// scene's spawned descendants are despawned), per the documented replace semantics.
     #[test]
     fn adv1b_queue_apply_scene_onto_queue_spawned_entity() {
         let mut app = test_app();
@@ -1847,11 +1804,11 @@ mod tests {
         );
     }
 
-    /// ADV-2: forward `#Name` references used only as component values leak an entity on every
-    /// reload. `apply_recording` only records related entities, not entities materialized by
-    /// `SceneEntityReferences::get`, so nothing ever despawns them.
+    /// ADV-2 (fixed): forward `#Name` references used only as component values are recorded and
+    /// reclaimed on reload. `apply_recording` unions the `SceneEntityReferences` map into the
+    /// spawn record, so the materialized entity is despawned with the rest of its generation.
     #[test]
-    fn adv2_ghost_reference_entities_leak_on_reload() {
+    fn adv2_ghost_reference_entities_do_not_leak_on_reload() {
         let scenes = FakeScenes::default();
         scenes.write("a.fakescene", || bsn! { Reference(#Ghost) });
         let mut app = hot_reload_app(&scenes, &["a.fakescene"]);
@@ -1894,12 +1851,11 @@ mod tests {
         );
     }
 
-    /// ADV-3: re-adding `ScenePatchInstance` (the natural way to swap which scene an entity is an
-    /// instance of) applies the new scene without despawning the previous generation — the
-    /// #24939 ghost, on a path the new bookkeeping does not cover. The old entities are also
-    /// dropped from `spawned`, so no later reload can ever clean them up.
+    /// ADV-3 (fixed): re-adding `ScenePatchInstance` (the natural way to swap which scene an
+    /// entity is an instance of) despawns the previous generation before the new scene applies —
+    /// `apply_to_instance` owns the despawn, so no path can orphan a generation (#24939 class).
     #[test]
-    fn adv3_reinserting_scene_patch_instance_orphans_previous_generation() {
+    fn adv3_reinserting_scene_patch_instance_despawns_previous_generation() {
         let scenes = FakeScenes::default();
         scenes.write("a.fakescene", || bsn! { Children [ #A, #B ] });
         scenes.write("b.fakescene", || bsn! { Children [ #C ] });

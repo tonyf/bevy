@@ -1521,7 +1521,9 @@ error: Field shorthand (`{ name }`) is not supported in `.bsn` assets, because t
 // §11.5 Hygiene tests
 // ---------------------------------------------------------------------------------------
 
-/// The six library source files (the test module itself is exempt).
+/// Every shipped library source file: `lib.rs` plus each module it declares outside
+/// `#[cfg(test)]`. [`sources_have_no_bevy_or_std_references`] checks that this list is complete,
+/// so a new module cannot silently escape the scan.
 const SOURCES: [(&str, &str); 6] = [
     ("lib.rs", include_str!("lib.rs")),
     ("ast.rs", include_str!("ast.rs")),
@@ -1530,6 +1532,40 @@ const SOURCES: [(&str, &str); 6] = [
     ("parser.rs", include_str!("parser.rs")),
     ("printer.rs", include_str!("printer.rs")),
 ];
+
+/// The modules exempt from [`SOURCES`], because they exist only under `#[cfg(test)]` and so are
+/// never compiled into the shipped crate. Anything added here has to be a deliberate decision.
+const TEST_ONLY_MODULES: [&str; 2] = ["adversarial", "tests"];
+
+/// Splits `lib.rs` into the module names it declares, as `(shipped, test only)`.
+fn declared_modules(lib: &str) -> (Vec<String>, Vec<String>) {
+    let mut shipped = Vec::new();
+    let mut test_only = Vec::new();
+    let mut under_cfg_test = false;
+    for line in lib.lines() {
+        let line = line.trim();
+        if line == "#[cfg(test)]" {
+            under_cfg_test = true;
+            continue;
+        }
+        let declaration = line
+            .strip_prefix("pub(crate) ")
+            .or_else(|| line.strip_prefix("pub "))
+            .unwrap_or(line);
+        if let Some(name) = declaration
+            .strip_prefix("mod ")
+            .and_then(|rest| rest.strip_suffix(';'))
+        {
+            if under_cfg_test {
+                test_only.push(name.to_string());
+            } else {
+                shipped.push(name.to_string());
+            }
+        }
+        under_cfg_test = false;
+    }
+    (shipped, test_only)
+}
 
 #[test]
 fn manifest_has_no_bevy_dependencies() {
@@ -1564,6 +1600,22 @@ fn manifest_has_no_bevy_dependencies() {
 
 #[test]
 fn sources_have_no_bevy_or_std_references() {
+    // The scan is only as good as its list, so derive that list from `lib.rs` itself: every
+    // module declared outside `#[cfg(test)]` must appear in `SOURCES`, in the same order.
+    let (shipped, test_only) = declared_modules(SOURCES[0].1);
+    let expected: Vec<String> = core::iter::once("lib.rs".to_string())
+        .chain(shipped.iter().map(|name| format!("{name}.rs")))
+        .collect();
+    let scanned: Vec<String> = SOURCES.iter().map(|(name, _)| name.to_string()).collect();
+    assert_eq!(
+        scanned, expected,
+        "`SOURCES` must list `lib.rs` and every module it declares outside `cfg(test)`"
+    );
+    assert_eq!(
+        test_only, TEST_ONLY_MODULES,
+        "only `cfg(test)`-only modules may be left out of the scan"
+    );
+
     for (name, source) in SOURCES {
         // The crate is allowed to name itself, and the `use`-import diagnostic quotes a
         // fully-qualified type path as an example. Neither is a dependency: no other

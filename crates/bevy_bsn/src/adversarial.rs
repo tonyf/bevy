@@ -1,8 +1,15 @@
-//! Adversarial review probes. TEMPORARY — not part of the deliverable.
-#![allow(
-    clippy::print_stdout,
-    reason = "these probes report measurements and rendered diagnostics to the reviewer"
-)]
+//! Adversarial regression suite for the lexer, parser and printer.
+//!
+//! Every test in the first section comes from the adversarial correctness review of this crate
+//! and pins a defect that review found: each one failed before the fix and asserts the fixed
+//! behavior now, so a regression shows up here first.
+//!
+//! The rest of the module is a set of bounded, deterministic property loops — seed mutation,
+//! fragment soup, a grammar-directed document generator, and the shared [`exercise`] invariant
+//! battery (span validity, pre-order ids, print/parse round trip, printer idempotence). They
+//! run on every platform in a couple of seconds; the persistent coverage-guided targets in
+//! `crates/bevy_bsn/fuzz/`, which reuse this module's seed corpus, are the complement that
+//! runs long and shrinks.
 
 use alloc::{
     format,
@@ -53,14 +60,14 @@ fn wrap_id(mut document: BsnDocument, inner: BsnValueId) -> BsnDocument {
 }
 
 // ---------------------------------------------------------------------------------------
-// Confirmed defects
+// Fixed defects, each pinned by the test that found it
 // ---------------------------------------------------------------------------------------
 
-/// BUG A: `( v )` is a grouping per SPEC-3 §5.3, but a path with generic arguments makes
-/// `paren_has_top_level_comma` see the generic argument comma at "top level" and the value
-/// silently becomes a one-element tuple.
+/// `( v )` is a grouping per SPEC-3 §5.3. A path with generic arguments used to make
+/// `paren_has_top_level_comma` see the generic argument's comma at "top level", silently
+/// turning the value into a one-element tuple; the comma scan now tracks angle-bracket depth.
 #[test]
-fn bug_a_grouping_parens_around_generic_path_become_a_tuple() {
+fn grouping_parens_around_generic_paths_stay_groupings() {
     let grouped = parse("A { x: (my_game::Pair<f32, f32>) }").unwrap();
     let bare = parse("A { x: my_game::Pair<f32, f32> }").unwrap();
     assert!(
@@ -70,22 +77,21 @@ fn bug_a_grouping_parens_around_generic_path_become_a_tuple() {
     );
 }
 
-/// BUG B: `Int(i128::MIN)` prints text that does not parse, violating the §7.9 round-trip
-/// property for builder-constructed documents.
+/// A builder-constructed `Int(i128::MIN)` used to print text that did not parse, violating the
+/// §7.9 round-trip property.
 #[test]
-fn bug_b_i128_min_does_not_round_trip() {
+fn i128_min_round_trips_through_the_printer() {
     let document = wrap(BsnValue::Int(i128::MIN));
     let text = print_document(&document);
     let reparsed = parse(&text).expect("printed text must re-parse");
     assert!(document.structural_eq(&reparsed));
 }
 
-/// BUG B': the same value cannot be written in source at all.
-///
-/// Fixed: the negation path decodes the magnitude as `u128`, so `2^127` is reachable. Both
-/// the decimal and the radix spelling must work, and one past it must still be rejected.
+/// The same value used to be unwritable in source at all: the negation path now decodes the
+/// magnitude as `u128`, so `2^127` is reachable. Both the decimal and the radix spellings must
+/// work, and one past it must still be rejected.
 #[test]
-fn bug_b2_i128_min_literal_is_rejected() {
+fn i128_min_literal_is_accepted_in_source() {
     for source in [
         "A(-170141183460469231731687303715884105728)",
         "A(-0x80000000000000000000000000000000)",
@@ -115,13 +121,13 @@ fn bug_b2_i128_min_literal_is_rejected() {
     ));
 }
 
-/// BUG C: an empty `Tuple` prints as `()` and re-parses as `Unit`.
+/// An empty `Tuple` prints as `()` and re-parses as `Unit`, which used to break the round trip.
 ///
-/// Fixed: the distinction is unrepresentable in text, so `structural_eq` treats `Unit` and
-/// an empty `Tuple` as equal (in both directions) and the round trip holds. The printer is
-/// unchanged — both still print as `()`.
+/// The distinction is unrepresentable in text, so `structural_eq` treats `Unit` and an empty
+/// `Tuple` as equal (in both directions) and the round trip holds. The printer is unchanged —
+/// both still print as `()`.
 #[test]
-fn bug_c_empty_tuple_does_not_round_trip() {
+fn empty_tuple_and_unit_are_round_trip_equal() {
     let document = wrap(BsnValue::Tuple(vec![]));
     let text = print_document(&document);
     assert_eq!(text, "A(())\n");
@@ -144,10 +150,10 @@ fn bug_c_empty_tuple_does_not_round_trip() {
     assert!(!inner.structural_eq(&unit));
 }
 
-/// BUG D: a negative NaN prints as `NaN` and re-parses with a different bit pattern, which
+/// A negative NaN used to print as `NaN` and re-parse with a different bit pattern, which
 /// `structural_eq` (documented to compare floats by `to_bits`) rejects.
 #[test]
-fn bug_d_negative_nan_does_not_round_trip() {
+fn negative_nan_round_trips() {
     let document = wrap(BsnValue::Float(-f64::NAN));
     let text = print_document(&document);
     let reparsed = parse(&text).unwrap();
@@ -157,16 +163,11 @@ fn bug_d_negative_nan_does_not_round_trip() {
     );
 }
 
-/// BUG E: a binary/octal literal with an out-of-radix digit is silently split into two
-/// integer tokens instead of being reported as an invalid number.
-///
-/// Fixed: the out-of-radix run is folded into a single invalid-number token, so the literal
-/// is diagnosed as one bad literal rather than accepted as two good ones.
+/// A binary/octal literal with an out-of-radix digit used to be split into two integer tokens
+/// and silently accepted. The out-of-radix run is now folded into a single invalid-number
+/// token, so the literal is diagnosed as one bad literal rather than accepted as two good ones.
 #[test]
-fn bug_e_out_of_radix_digit_splits_the_token() {
-    for source in ["0b12", "0o19", "0b1_2", "0x0", "0b102030"] {
-        std::println!("{source} -> {:?}", lex_kinds(source));
-    }
+fn out_of_radix_digit_is_one_invalid_number_token() {
     let invalid = vec![
         TokenKind::Error(crate::LexError::InvalidNumber),
         TokenKind::Eof,
@@ -177,11 +178,10 @@ fn bug_e_out_of_radix_digit_splits_the_token() {
     assert_eq!(lex_kinds("0b102030"), invalid);
     for source in ["A(0b12)", "A(0o19)"] {
         let error = parse(source).unwrap_err();
-        std::println!("{source} -> {error}");
-        assert!(matches!(
-            error.kind,
-            crate::BsnParseErrorKind::InvalidNumber
-        ));
+        assert!(
+            matches!(error.kind, crate::BsnParseErrorKind::InvalidNumber),
+            "{source} -> {error}"
+        );
     }
     // Legal radix literals and alphabetic suffixes are untouched.
     assert_eq!(lex_kinds("0b1010"), vec![TokenKind::Int, TokenKind::Eof]);
@@ -545,7 +545,6 @@ fn multibyte_line_col_is_char_accurate() {
     let error = parse(source).unwrap_err();
     let (line, column) = error.span.line_col(source);
     assert_eq!((line, column), (2, 10), "{}", error.render(source, None));
-    std::println!("{}", error.render(source, None));
 }
 
 // ---------------------------------------------------------------------------------------
@@ -696,8 +695,10 @@ fn fuzz_generated_valid_documents() {
         }
         exercise(&source);
     }
-    std::println!("[gen] {ok}/20000 generated documents parsed");
-    assert!(ok > 15_000, "generator produced too few valid documents");
+    assert!(
+        ok > 15_000,
+        "generator produced too few valid documents: {ok}/20000 parsed"
+    );
 }
 
 // ---------------------------------------------------------------------------------------
@@ -917,10 +918,11 @@ fn non_default_print_options_still_re_parse() {
     }
 }
 
-/// A shared sub-value (a DAG, which the arena API makes trivial to build) makes the printer
-/// produce output that is exponential in the number of value nodes.
+/// A shared sub-value (a DAG, which the arena API makes trivial to build) used to make the
+/// printer produce output exponential in the number of value nodes. A visit budget now bounds
+/// the output and marks where it was cut.
 #[test]
-fn shared_value_ids_blow_up_the_printer() {
+fn shared_value_ids_hit_the_print_budget() {
     let mut document = BsnDocument::new();
     let mut current = document.push_value(BsnValue::Int(123_456));
     for _ in 0..20 {
@@ -929,11 +931,6 @@ fn shared_value_ids_blow_up_the_printer() {
     let document = wrap_id(document, current);
     assert!(document.values.len() < 25);
     let text = print_document(&document);
-    std::println!(
-        "[dag] {} value nodes printed {} bytes",
-        document.values.len(),
-        text.len()
-    );
     assert!(
         text.len() < 100_000,
         "{} value nodes produced {} bytes of output",
@@ -1069,12 +1066,11 @@ fn comments_in_awkward_places() {
     ));
 }
 
-/// A patch appended to a *parsed* entity has `Span::NONE`, so the span-ordered merge prints
-/// it before every parsed entry — patch order is semantically significant.
-///
-/// Fixed: an entry with no span sorts after every spanned one, so an append prints last.
+/// A patch appended to a *parsed* entity has `Span::NONE`, and the span-ordered merge used to
+/// print it before every parsed entry — patch order is semantically significant. An entry with
+/// no span now sorts after every spanned one, so an append prints last.
 #[test]
-fn appending_a_patch_to_a_parsed_entity_reorders_it() {
+fn appending_a_patch_to_a_parsed_entity_prints_it_last() {
     let mut document = parse("First\nSecond").unwrap();
     let patch = document.push_patch(
         BsnPatchPrefix::FromTemplate,
@@ -1093,21 +1089,41 @@ fn appending_a_patch_to_a_parsed_entity_reorders_it() {
 fn bom_does_not_shift_the_reported_column() {
     let source = "\u{feff}A { x }";
     let error = parse(source).unwrap_err();
-    std::println!("{}", error.render(source, None));
-    assert_eq!(error.span.line_col(source), (1, 6));
+    assert_eq!(
+        error.span.line_col(source),
+        (1, 6),
+        "{}",
+        error.render(source, None)
+    );
 }
 
+/// The duplicate-field check used to compare every field against every earlier one, so a wide
+/// struct cost O(n²) string comparisons. It is O(n log n) now, which the correctness tests for
+/// [`crate::BsnParseErrorKind::DuplicateField`] pin; this one is the performance tripwire.
+///
+/// The bound is deliberately enormous — a debug build parses this in single-digit milliseconds,
+/// while the quadratic version took seconds — so it can only fire on a real complexity
+/// regression, never on a slow or loaded machine.
 #[test]
-fn quadratic_field_check_timing() {
-    // Not an assertion, just a measurement of the O(n^2) duplicate-field scan.
-    for count in [2000usize, 4000, 8000] {
-        let mut source = String::from("A {");
-        for index in 0..count {
-            source.push_str(&format!("f{index}: 1,"));
-        }
-        source.push('}');
-        let start = std::time::Instant::now();
-        let _ = parse(&source).unwrap();
-        std::println!("[timing] {count} fields: {:?}", start.elapsed());
+fn a_wide_struct_body_does_not_parse_quadratically() {
+    const FIELDS: usize = 4000;
+    let mut source = String::from("A {");
+    for index in 0..FIELDS {
+        source.push_str(&format!("f{index}: 1,"));
     }
+    source.push('}');
+
+    let start = std::time::Instant::now();
+    let document = parse(&source).unwrap();
+    let elapsed = start.elapsed();
+
+    // `values[0]` is the `A { … }` struct itself; every field is a value of its own.
+    let BsnValue::Struct(_, fields) = &document.values[0].value else {
+        panic!("expected a struct value:\n{}", document.debug_tree());
+    };
+    assert_eq!(fields.len(), FIELDS);
+    assert!(
+        elapsed < core::time::Duration::from_secs(2),
+        "parsing {FIELDS} distinct fields took {elapsed:?}"
+    );
 }

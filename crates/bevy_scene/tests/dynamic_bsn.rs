@@ -1552,3 +1552,139 @@ fn entity_references_across_reload() {
     let rebuilt = app.world().get::<Children>(root).unwrap()[0];
     assert_eq!(app.world().get::<Reference>(rebuilt).unwrap().0, root);
 }
+
+/// Editing a base file re-resolves *every* dependent instance, not just the first one — the
+/// real-text mirror of `spawn.rs`'s `hot_reload_of_base_updates_dependent_file_instances`, which
+/// drives the same path through `.fakescene` closures.
+#[test]
+fn hot_reload_bsn_base_updates_every_dependent_instance() {
+    let dir = Dir::default();
+    dir.insert_asset_text(Path::new("b.bsn"), "Position { x: 1.0, y: 1.0 }");
+    // `a.bsn` patches `Position` too, so each of its instances holds a copy-on-write snapshot of
+    // the base's template. Those snapshots are what a base edit would otherwise leave stale.
+    dir.insert_asset_text(Path::new("a.bsn"), ":\"b.bsn\"\nPosition { x: 2.0 }");
+    let mut app = test_app(&dir);
+
+    let dependents = [
+        spawn_instance(&mut app, "a.bsn"),
+        spawn_instance(&mut app, "a.bsn"),
+    ];
+    let base = spawn_instance(&mut app, "b.bsn");
+    for root in dependents {
+        assert_eq!(
+            *app.world().get::<Position>(root).unwrap(),
+            Position {
+                x: 2.0,
+                y: 1.0,
+                z: 0.0
+            }
+        );
+    }
+
+    edit_and_save(&app, &dir, "b.bsn", "Position { x: 1.0, y: 9.0 }");
+    run_app_until(&mut app, |app| {
+        [dependents[0], dependents[1], base]
+            .iter()
+            .all(|root| app.world().get::<Position>(*root).unwrap().y == 9.0)
+    });
+
+    for root in dependents {
+        assert_eq!(
+            *app.world().get::<Position>(root).unwrap(),
+            Position {
+                x: 2.0,
+                y: 9.0,
+                z: 0.0
+            },
+            "every instance of the dependent file is rebuilt, and its own patch still wins"
+        );
+    }
+    assert_eq!(
+        *app.world().get::<Position>(base).unwrap(),
+        Position {
+            x: 1.0,
+            y: 9.0,
+            z: 0.0
+        },
+        "and the instance of the edited file itself is updated too"
+    );
+}
+
+/// Two saves of the same file with no frame in between collapse into a single despawn/apply
+/// cycle, with the last text winning — the real-text mirror of `spawn.rs`'s
+/// `hot_reload_twice_in_one_frame_applies_once`.
+#[test]
+fn hot_reload_bsn_twice_in_one_frame_applies_once() {
+    let dir = Dir::default();
+    dir.insert_asset_text(Path::new("a.bsn"), "Children [ #A ]");
+    let mut app = test_app(&dir);
+
+    let before = app.world().entities().count_spawned();
+    let root = spawn_instance(&mut app, "a.bsn");
+    assert_eq!(child_names(&app, root), ["A"]);
+
+    // Both edits land before the next `app.update()`, so both loader runs read the *second* text.
+    edit_and_save(&app, &dir, "a.bsn", "Children [ #B ]");
+    edit_and_save(&app, &dir, "a.bsn", "Children [ #C ]");
+    run_app_until(&mut app, |app| child_names(app, root) == ["C"]);
+    for _ in 0..10 {
+        app.update();
+    }
+
+    assert_eq!(
+        child_names(&app, root),
+        ["C"],
+        "the last save is the one that sticks"
+    );
+    assert_eq!(
+        app.world().entities().count_spawned(),
+        before + 2,
+        "the instance entity and one child, with no generation left orphaned behind them"
+    );
+}
+
+/// Re-inserting `ScenePatchInstance` — the natural way to swap which scene an entity is an
+/// instance of — applies the new file's content and despawns the previous generation rather than
+/// orphaning it. The real-text mirror of `spawn.rs`'s ADV-3.
+#[test]
+fn reinserting_scene_patch_instance_swaps_the_bsn_file() {
+    let dir = Dir::default();
+    dir.insert_asset_text(Path::new("a.bsn"), "Children [ #A, #B ]");
+    dir.insert_asset_text(Path::new("b.bsn"), "Children [ #C ]");
+    let mut app = test_app(&dir);
+
+    let before = app.world().entities().count_spawned();
+    let root = spawn_instance(&mut app, "a.bsn");
+    assert_eq!(child_names(&app, root), ["A", "B"]);
+    let previous: Vec<Entity> = app
+        .world()
+        .get::<Children>(root)
+        .unwrap()
+        .iter()
+        .copied()
+        .collect();
+
+    let b = app
+        .world()
+        .resource::<AssetServer>()
+        .load::<ScenePatch>("b.bsn");
+    app.world_mut()
+        .entity_mut(root)
+        .remove::<ScenePatchInstance>();
+    app.world_mut()
+        .entity_mut(root)
+        .insert(ScenePatchInstance(b));
+    run_app_until(&mut app, |app| child_names(app, root) == ["C"]);
+
+    for entity in previous {
+        assert!(
+            app.world().get_entity(entity).is_err(),
+            "swapping the scene must not orphan the previous generation"
+        );
+    }
+    assert_eq!(
+        app.world().entities().count_spawned(),
+        before + 2,
+        "the instance entity and the one child of the new scene"
+    );
+}

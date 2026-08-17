@@ -1,15 +1,21 @@
-//! Adversarial correctness probes. Not part of the shipped test suite.
+//! Adversarial regression suite for the dynamic scene layer.
+//!
+//! These tests come from the adversarial correctness review of `dynamic/`, which attacked the
+//! resolver, the value builder and the asset paths with inputs the happy-path tests in
+//! [`super::tests`] never produce: leaked resolve context between siblings, malformed asset
+//! paths, `#[reflect(ignore)]` fields, opaque types, shadowed enum variants, self-includes,
+//! non-scene bases, and shape mismatches of every kind. Each one either pins a defect the
+//! review found and fixed, or pins the graceful-error behavior that replaced a panic — so a
+//! regression fails here rather than in a user's `.bsn` file.
+//!
+//! The sections are the review's batches, kept as they were written so that a failure is easy
+//! to trace back to the finding it came from. The fixture components and the fixture-registered
+//! `App` builder they run against live in [`super::tests`].
 
 use std::path::Path;
 
-use bevy_app::{App, TaskPoolPlugin};
-use bevy_asset::{
-    io::{
-        memory::{Dir, MemoryAssetReader},
-        AssetSourceBuilder, AssetSourceId,
-    },
-    AssetApp, AssetPlugin, AssetServer,
-};
+use bevy_app::App;
+use bevy_asset::{AssetApp, AssetServer};
 use bevy_ecs::{
     hierarchy::Children,
     name::Name,
@@ -21,27 +27,13 @@ use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 use crate::{
     self as bevy_scene, bsn,
     dynamic::tests::{register_fixtures, scene, test_app, Choice, Foo, Position},
-    ScenePatch, ScenePlugin, WorldSceneExt,
+    test_support::memory_asset_app,
+    ScenePatch, WorldSceneExt,
 };
 
 /// An app whose memory asset source contains the given `(path, source)` `.bsn` files, all loaded.
 fn multi_asset_app(files: &[(&'static str, &'static str)]) -> App {
-    let mut app = App::new();
-    let dir = Dir::default();
-    let reader_dir = dir.clone();
-    app.register_asset_source(
-        AssetSourceId::Default,
-        AssetSourceBuilder::new(move || {
-            Box::new(MemoryAssetReader {
-                root: reader_dir.clone(),
-            })
-        }),
-    );
-    app.add_plugins((
-        TaskPoolPlugin::default(),
-        AssetPlugin::default(),
-        ScenePlugin,
-    ));
+    let (mut app, dir) = memory_asset_app();
     app.init_asset::<crate::dynamic::tests::Image>();
     app.register_asset_reflect::<crate::dynamic::tests::Image>();
     register_fixtures(&mut app);
@@ -70,14 +62,14 @@ fn multi_asset_app(files: &[(&'static str, &'static str)]) -> App {
 }
 
 // =========================================================================================
-// A1: sibling base leak — `context.cached` is not cleared between sibling related entities.
+// A1: sibling base leak — `context.cached` used not to be cleared between sibling entities.
 // =========================================================================================
 
 #[test]
-fn a1_sibling_base_leaks_cached_context() {
+fn a1_sibling_base_does_not_leak_cached_context() {
     // `c.bsn` declares a `Position`. The first child of `b.bsn` includes it as a base; the second
-    // child includes nothing at all, yet `context.cached` is still pointing at `c.bsn` when it is
-    // resolved.
+    // child includes nothing at all, and used to be resolved with `context.cached` still pointing
+    // at `c.bsn`.
     let mut app = multi_asset_app(&[("c.bsn", "Position { y: 9.0 }")]);
     let b = scene(
         &app,
@@ -753,22 +745,7 @@ fn b14_base_is_a_non_scene_asset() {
 
 /// Like [`multi_asset_app`] but does not require the files to load successfully.
 fn multi_asset_app_lenient(files: &[(&'static str, &'static str)]) -> App {
-    let mut app = App::new();
-    let dir = Dir::default();
-    let reader_dir = dir.clone();
-    app.register_asset_source(
-        AssetSourceId::Default,
-        AssetSourceBuilder::new(move || {
-            Box::new(MemoryAssetReader {
-                root: reader_dir.clone(),
-            })
-        }),
-    );
-    app.add_plugins((
-        TaskPoolPlugin::default(),
-        AssetPlugin::default(),
-        ScenePlugin,
-    ));
+    let (mut app, dir) = memory_asset_app();
     app.init_asset::<crate::dynamic::tests::Image>();
     app.register_asset_reflect::<crate::dynamic::tests::Image>();
     register_fixtures(&mut app);
@@ -796,10 +773,10 @@ fn multi_asset_app_lenient(files: &[(&'static str, &'static str)]) -> App {
 }
 
 // =========================================================================================
-// C: batch 3 — characterizing B1 and B3
+// C: batch 3 — the follow-ups B1 and B3 asked for
 // =========================================================================================
 
-/// C1: an ignored field breaks *spawning* of a dynamic patch, but not of the static equivalent.
+/// C1: an ignored field must not break *spawning*, on either the static or the dynamic path.
 #[test]
 fn c1_ignored_field_static_path_works() {
     let mut app = test_app();
@@ -813,7 +790,7 @@ fn c1_ignored_field_static_path_works() {
 }
 
 #[test]
-fn c1b_ignored_field_dynamic_path_fails_to_spawn() {
+fn c1b_ignored_field_dynamic_path_works_too() {
     let mut app = test_app();
     app.register_type::<IgnoreStruct>();
     let a = scene(&app, "a.bsn", "IgnoreStruct { v: 1 }");
@@ -828,9 +805,9 @@ fn c1b_ignored_field_dynamic_path_fails_to_spawn() {
     }
 }
 
-/// C2: which malformed asset-path spellings panic.
+/// C2: no malformed asset-path spelling may panic; each one has to become a build error.
 #[test]
-fn c2_asset_path_panic_matrix() {
+fn c2_malformed_asset_paths_never_panic() {
     let app = test_app();
     for bad in ["bad#source://x.png", "://x.png", "s://x.png#a://b"] {
         let source = format!(r#"Sprite("{bad}")"#);
@@ -934,7 +911,7 @@ fn c4b_opaque_field_static_path_works() {
 // D: batch 4
 // =========================================================================================
 
-/// D1: `Name("x")` works in `bsn!` but not in a `.bsn`.
+/// D1: `Name("x")` must work the same way in a `.bsn` file as it does in `bsn!`.
 #[test]
 fn d1_name_static_path_works() {
     let mut app = test_app();

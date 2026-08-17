@@ -3,14 +3,8 @@
 
 use std::path::Path;
 
-use bevy_app::{App, TaskPoolPlugin};
-use bevy_asset::{
-    io::{
-        memory::{Dir, MemoryAssetReader},
-        AssetSourceBuilder, AssetSourceId,
-    },
-    Asset, AssetApp, AssetPlugin, AssetServer, Assets, Handle, HandleTemplate, ReflectHandle,
-};
+use bevy_app::App;
+use bevy_asset::{Asset, AssetApp, AssetServer, Assets, Handle, HandleTemplate, ReflectHandle};
 use bevy_bsn::{parse, BsnDocument};
 use bevy_ecs::{
     entity::Entity,
@@ -28,8 +22,8 @@ use bevy_reflect::{std_traits::ReflectDefault, Reflect, TypeRegistry};
 use core::any::TypeId;
 
 use crate::{
-    self as bevy_scene, bsn, DynamicScene, ResolvedSceneRoot, Scene, ScenePatch, ScenePlugin,
-    WorldSceneExt,
+    self as bevy_scene, bsn, test_support::memory_asset_app, DynamicScene, ResolvedSceneRoot,
+    Scene, ScenePatch, WorldSceneExt,
 };
 
 // ---------------------------------------------------------------------------------------
@@ -291,12 +285,7 @@ pub(crate) fn doc(source: &str) -> BsnDocument {
 
 /// An [`App`] with the asset and scene plugins plus every fixture type registered.
 pub(crate) fn test_app() -> App {
-    let mut app = App::new();
-    app.add_plugins((
-        TaskPoolPlugin::default(),
-        AssetPlugin::default(),
-        ScenePlugin,
-    ));
+    let mut app = crate::test_support::test_app();
     app.init_asset::<Image>();
     app.register_asset_reflect::<Image>();
     register_fixtures(&mut app);
@@ -843,22 +832,7 @@ fn dynamic_scene_is_clone_send_sync_and_scene() {
 
 /// An [`App`] whose asset source contains an `a.bsn` that loads as a dynamic scene.
 fn base_asset_app(base_source: &'static str) -> App {
-    let mut app = App::new();
-    let dir = Dir::default();
-    let reader_dir = dir.clone();
-    app.register_asset_source(
-        AssetSourceId::Default,
-        AssetSourceBuilder::new(move || {
-            Box::new(MemoryAssetReader {
-                root: reader_dir.clone(),
-            })
-        }),
-    );
-    app.add_plugins((
-        TaskPoolPlugin::default(),
-        AssetPlugin::default(),
-        ScenePlugin,
-    ));
+    let (mut app, dir) = memory_asset_app();
     app.init_asset::<Image>();
     app.register_asset_reflect::<Image>();
     register_fixtures(&mut app);

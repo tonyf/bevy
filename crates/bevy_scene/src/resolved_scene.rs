@@ -1165,7 +1165,7 @@ mod unsafe_paths {
         let mut registry = TypeRegistry::empty();
         registry.register::<Children>();
         let data = registry
-            .get_type_data::<ReflectRelationshipTarget>(core::any::TypeId::of::<Children>())
+            .get_type_data::<ReflectRelationshipTarget>(TypeId::of::<Children>())
             .unwrap()
             .clone();
 

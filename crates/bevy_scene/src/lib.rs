@@ -975,6 +975,8 @@ mod scene_list;
 mod scene_patch;
 mod spawn;
 mod spawn_system;
+#[cfg(test)]
+mod test_support;
 
 #[cfg(feature = "bsn_asset")]
 pub use dynamic::*;
@@ -1047,13 +1049,12 @@ impl Plugin for ScenePlugin {
 
 #[cfg(test)]
 mod tests {
-    use crate::{self as bevy_scene, ScenePlugin};
+    use crate::test_support::{memory_asset_app, run_app_until, test_app};
+    use crate::{self as bevy_scene};
     use crate::{prelude::*, ScenePatch};
     use alloc::sync::Arc;
-    use bevy_app::{App, TaskPoolPlugin};
-    use bevy_asset::io::memory::{Dir, MemoryAssetReader};
-    use bevy_asset::io::{AssetSourceBuilder, AssetSourceId};
-    use bevy_asset::{Asset, AssetApp, AssetLoader, AssetPlugin, AssetServer, Assets, Handle};
+    use bevy_app::App;
+    use bevy_asset::{Asset, AssetApp, AssetLoader, AssetServer, Assets, Handle};
     use bevy_ecs::lifecycle::HookContext;
     use bevy_ecs::name::Name;
     use bevy_ecs::prelude::*;
@@ -1064,16 +1065,6 @@ mod tests {
     use bevy_scene_macros::SceneComponent;
     use std::path::Path;
     use std::sync::Mutex;
-
-    fn test_app() -> App {
-        let mut app = App::new();
-        app.add_plugins((
-            TaskPoolPlugin::default(),
-            AssetPlugin::default(),
-            ScenePlugin,
-        ));
-        app
-    }
 
     #[test]
     fn supports_fully_qualified_component_paths() {
@@ -1198,23 +1189,7 @@ mod tests {
             value: usize,
         }
 
-        let mut app = App::new();
-        let dir = Dir::default();
-        let dir_clone = dir.clone();
-        app.register_asset_source(
-            AssetSourceId::Default,
-            AssetSourceBuilder::new(move || {
-                Box::new(MemoryAssetReader {
-                    root: dir_clone.clone(),
-                })
-            }),
-        );
-        app.add_plugins((
-            TaskPoolPlugin::default(),
-            AssetPlugin::default(),
-            ScenePlugin,
-        ));
-
+        let (mut app, dir) = memory_asset_app();
         app.finish();
         app.cleanup();
         // Create a fake loader to act as a ScenePatch loaded from a file.
@@ -1249,7 +1224,7 @@ mod tests {
         let asset_server = app.world().resource::<AssetServer>().clone();
         let handle = asset_server.load("a.fakescene");
         assert!(app.world().get_resource::<Assets<ScenePatch>>().is_some());
-        run_app_until(&mut app, || asset_server.is_loaded(&handle));
+        run_app_until(&mut app, |_| asset_server.is_loaded(&handle));
         let patch = app
             .world()
             .resource::<Assets<ScenePatch>>()
@@ -2615,18 +2590,6 @@ mod tests {
         assert_eq!(current_entities, world.entities().len());
     }
 
-    fn run_app_until(app: &mut App, mut predicate: impl FnMut() -> bool) {
-        const LARGE_ITERATION_COUNT: usize = 10000;
-        for _ in 0..LARGE_ITERATION_COUNT {
-            app.update();
-            if predicate() {
-                return;
-            }
-        }
-
-        panic!("Ran out of loops to return `Some` from `predicate`");
-    }
-
     // NOTE: function scene caching is not yet implemented
     // #[test]
     // fn caching_with_generics() {
@@ -3258,22 +3221,7 @@ mod tests {
                 }
             }
 
-            let mut app = App::new();
-            let dir = Dir::default();
-            let dir_clone = dir.clone();
-            app.register_asset_source(
-                AssetSourceId::Default,
-                AssetSourceBuilder::new(move || {
-                    Box::new(MemoryAssetReader {
-                        root: dir_clone.clone(),
-                    })
-                }),
-            );
-            app.add_plugins((
-                TaskPoolPlugin::default(),
-                AssetPlugin::default(),
-                ScenePlugin,
-            ));
+            let (mut app, dir) = memory_asset_app();
             app.finish();
             app.cleanup();
             app.register_asset_loader(FakeSceneLoader);
@@ -3281,7 +3229,7 @@ mod tests {
             dir.insert_asset_text(Path::new("dynamic_base.fakescene"), "");
             let asset_server = app.world().resource::<AssetServer>().clone();
             let handle: Handle<ScenePatch> = asset_server.load("dynamic_base.fakescene");
-            run_app_until(&mut app, || asset_server.is_loaded(&handle));
+            run_app_until(&mut app, |_| asset_server.is_loaded(&handle));
 
             FAKE_APPLY_COUNT.store(0, Ordering::Relaxed);
             let id = app
