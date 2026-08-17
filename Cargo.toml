@@ -792,6 +792,13 @@ getrandom = { version = "0.4", default-features = false, features = [
 wasm-bindgen = { version = "0.2" }
 web-sys = { version = "0.3", features = ["Window"] }
 
+# Integration tests in `tests/` are picked up automatically; this one only needs a manual target
+# because it requires an optional feature.
+[[test]]
+name = "dynamic_bsn_real"
+path = "tests/dynamic_bsn_real.rs"
+required-features = ["bsn_asset"]
+
 [[example]]
 name = "context_menu"
 path = "examples/usage/context_menu.rs"
