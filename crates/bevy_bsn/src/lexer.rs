@@ -444,7 +444,12 @@ impl<'src> Lexer<'src> {
                     break;
                 }
             }
-            if !any {
+            // A digit that is out of range for the radix (the `2` in `0b12`) would otherwise
+            // start a *second* number token, turning one bad literal into two good ones. An
+            // alphabetic tail is not split — it is a numeric suffix, reported below.
+            let out_of_radix_digit =
+                |c: char| c.is_alphanumeric() && !is_ident_start(c) && !c.is_digit(radix);
+            if !any || self.first().is_some_and(out_of_radix_digit) {
                 self.eat_ident_tail();
                 return Token {
                     kind: TokenKind::Error(LexError::InvalidNumber),
@@ -546,7 +551,23 @@ fn is_ident_continue(c: char) -> bool {
 ///
 /// Handles the `0x`, `0o` and `0b` prefixes and strips `_` separators. Returns
 /// [`BsnParseErrorKind::NumberOutOfRange`] if the value does not fit in an `i128`.
+///
+/// A literal token never carries a sign — `-1` lexes as [`TokenKind::Minus`] followed by
+/// [`TokenKind::Int`] — so this decodes the *magnitude*, and the magnitude of `i128::MIN`
+/// (`2^127`) is one past `i128::MAX`. Decoding the text of a negated `i128::MIN` therefore
+/// reports `NumberOutOfRange` here; the parser negates via [`decode_int_magnitude`] instead,
+/// so `-170141183460469231731687303715884105728` in a source file is accepted.
 pub fn decode_int(source: &str, span: Span) -> Result<i128, BsnParseError> {
+    let magnitude = decode_int_magnitude(source, span)?;
+    i128::try_from(magnitude)
+        .map_err(|_| BsnParseError::new(span, BsnParseErrorKind::NumberOutOfRange))
+}
+
+/// Decodes an integer literal token as an unsigned magnitude.
+///
+/// Same syntax as [`decode_int`], but the result is only bounded by `u128`, which lets the
+/// parser's negation path reach `i128::MIN` (whose magnitude is `i128::MAX as u128 + 1`).
+pub(crate) fn decode_int_magnitude(source: &str, span: Span) -> Result<u128, BsnParseError> {
     let text = span.text(source);
     let (radix, digits) = if let Some(rest) = text.strip_prefix("0x") {
         (16, rest)
@@ -562,7 +583,7 @@ pub fn decode_int(source: &str, span: Span) -> Result<i128, BsnParseError> {
     if cleaned.is_empty() {
         return Err(BsnParseError::new(span, BsnParseErrorKind::InvalidNumber));
     }
-    i128::from_str_radix(&cleaned, radix)
+    u128::from_str_radix(&cleaned, radix)
         .map_err(|_| BsnParseError::new(span, BsnParseErrorKind::NumberOutOfRange))
 }
 

@@ -367,6 +367,11 @@ impl BsnDocument {
     /// Floats are compared by `to_bits`, so `NaN` equals `NaN` and `0.0` does not equal
     /// `-0.0`. Ids are compared by the position they occupy in the traversal rather than by
     /// value, so two documents whose arenas are ordered differently can still be equal.
+    ///
+    /// [`BsnValue::Unit`] and an empty [`BsnValue::Tuple`] compare equal in both directions.
+    /// A builder can construct both, but `()` is the only text that denotes either, so the
+    /// distinction cannot survive a print/parse round trip and treating them as different
+    /// would break the round-trip property for documents the builder can legitimately build.
     pub fn structural_eq(&self, other: &BsnDocument) -> bool {
         if self.roots.len() != other.roots.len() {
             return false;
@@ -472,6 +477,11 @@ impl BsnDocument {
         };
         match (&a.value, &b.value) {
             (BsnValue::Unit, BsnValue::Unit) => true,
+            // `()` is the only text for both, so the printer cannot tell them apart and the
+            // comparison must not either. See the note on `structural_eq`.
+            (BsnValue::Unit, BsnValue::Tuple(items)) | (BsnValue::Tuple(items), BsnValue::Unit) => {
+                items.is_empty()
+            }
             (BsnValue::Bool(a), BsnValue::Bool(b)) => a == b,
             (BsnValue::Int(a), BsnValue::Int(b)) => a == b,
             (BsnValue::Float(a), BsnValue::Float(b)) => a.to_bits() == b.to_bits(),
@@ -653,6 +663,11 @@ pub(crate) const MAX_WALK_DEPTH: u32 = 256;
 ///
 /// Entries are ordered by [`Span::start`], with ties broken by ascending id, so a
 /// synthesized document (all spans [`Span::NONE`]) prints in builder order.
+///
+/// An entry with no span sorts *after* every spanned one rather than at offset 0, so
+/// appending to an entity that came from [`parse`](crate::parse) appends to its printed form
+/// too — patch order is semantically significant, and "appended last" is what the builder
+/// asked for. A dangling id has no span either and is ordered the same way.
 pub(crate) fn merge_entries(
     document: &BsnDocument,
     patches: &[BsnNodeId],
@@ -660,7 +675,13 @@ pub(crate) fn merge_entries(
 ) -> Vec<BsnNodeId> {
     let mut entries: Vec<BsnNodeId> = patches.iter().chain(relations).copied().collect();
     entries.sort_by_key(|id| {
-        let start = document.node(*id).map_or(0, |node| node.span.start);
+        let start = document.node(*id).map_or(u32::MAX, |node| {
+            if node.span.is_none() {
+                u32::MAX
+            } else {
+                node.span.start
+            }
+        });
         (start, id.0)
     });
     entries

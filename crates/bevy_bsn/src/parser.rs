@@ -15,8 +15,8 @@ use crate::ast::{
 };
 use crate::error::{unsupported, BsnParseError, BsnParseErrorKind};
 use crate::lexer::{
-    decode_float, decode_int, decode_string, lex_error_to_parse_error, Lexer, Span, Token,
-    TokenKind,
+    decode_float, decode_int, decode_int_magnitude, decode_string, lex_error_to_parse_error, Lexer,
+    Span, Token, TokenKind,
 };
 
 /// The maximum nesting depth of entities, values and paths.
@@ -473,6 +473,7 @@ impl<'src> Parser<'src> {
     fn parse_struct_body(&mut self) -> Result<Vec<(String, BsnValueId)>, BsnParseError> {
         self.expect(TokenKind::LBrace, &["`{`"])?;
         let mut fields: Vec<(String, BsnValueId)> = Vec::new();
+        let mut name_spans: Vec<Span> = Vec::new();
         loop {
             self.check_error_token()?;
             if self.peek() == TokenKind::RBrace {
@@ -488,17 +489,18 @@ impl<'src> Parser<'src> {
             }
             self.bump();
             let name = ident.span.text(self.source).to_string();
-            if fields.iter().any(|(existing, _)| *existing == name) {
-                return Err(BsnParseError::new(
-                    ident.span,
-                    BsnParseErrorKind::DuplicateField(name),
-                ));
-            }
             let value = self.parse_value()?;
             fields.push((name, value));
+            name_spans.push(ident.span);
             if !self.eat(TokenKind::Comma) {
                 break;
             }
+        }
+        if let Some(duplicate) = first_duplicate_field(&fields) {
+            return Err(BsnParseError::new(
+                name_spans[duplicate],
+                BsnParseErrorKind::DuplicateField(fields[duplicate].0.clone()),
+            ));
         }
         self.expect(TokenKind::RBrace, &["`,`", "`}`"])?;
         Ok(fields)
@@ -562,13 +564,22 @@ impl<'src> Parser<'src> {
                 match next.kind {
                     TokenKind::Int => {
                         self.bump();
-                        let value = decode_int(self.source, next.span)?;
-                        let value = value.checked_neg().ok_or_else(|| {
-                            BsnParseError::new(
-                                token.span.join(next.span),
-                                BsnParseErrorKind::NumberOutOfRange,
-                            )
-                        })?;
+                        // The magnitude of `i128::MIN` is one past `i128::MAX`, so the
+                        // literal only fits while it is still unsigned.
+                        let magnitude = decode_int_magnitude(self.source, next.span)?;
+                        let value = if magnitude == i128::MIN.unsigned_abs() {
+                            i128::MIN
+                        } else {
+                            i128::try_from(magnitude)
+                                .ok()
+                                .and_then(i128::checked_neg)
+                                .ok_or_else(|| {
+                                    BsnParseError::new(
+                                        token.span.join(next.span),
+                                        BsnParseErrorKind::NumberOutOfRange,
+                                    )
+                                })?
+                        };
                         Ok(self.push_value(token.span.join(next.span), BsnValue::Int(value)))
                     }
                     TokenKind::Float => {
@@ -582,6 +593,10 @@ impl<'src> Parser<'src> {
                             token.span.join(next.span),
                             BsnValue::Float(f64::NEG_INFINITY),
                         ))
+                    }
+                    TokenKind::Ident if matches!(next.span.text(self.source), "NaN" | "nan") => {
+                        self.bump();
+                        Ok(self.push_value(token.span.join(next.span), BsnValue::Float(-f64::NAN)))
                     }
                     _ => Err(BsnParseError::new(next.span, BsnParseErrorKind::NegOperand)),
                 }
@@ -671,8 +686,13 @@ impl<'src> Parser<'src> {
 
     /// Looks ahead for a comma at the top level of the parenthesised group the cursor is
     /// currently inside, which distinguishes `(v)` (grouping) from `(v,)` (a 1-tuple).
+    ///
+    /// Generic argument lists count as nesting too, so the separator in `(Pair<f32, f32>)`
+    /// does not make the group look like a tuple. A `>` only closes an angle group when one
+    /// is open, so a stray `>` cannot drive the depth negative and hide a real comma.
     fn paren_has_top_level_comma(&self) -> bool {
         let mut depth = 0u32;
+        let mut angle_depth = 0u32;
         let mut index = self.pos;
         while let Some(token) = self.tokens.get(index) {
             match token.kind {
@@ -683,7 +703,9 @@ impl<'src> Parser<'src> {
                     }
                     depth -= 1;
                 }
-                TokenKind::Comma if depth == 0 => return true,
+                TokenKind::Lt => angle_depth += 1,
+                TokenKind::Gt => angle_depth = angle_depth.saturating_sub(1),
+                TokenKind::Comma if depth == 0 && angle_depth == 0 => return true,
                 TokenKind::Eof => return false,
                 _ => {}
             }
@@ -798,6 +820,23 @@ impl<'src> Parser<'src> {
             PathPosition::Value => self.unsupported(unsupported::PATH_CASE, path.span),
         })
     }
+}
+
+/// Finds the earliest *repeat* of a field name in `fields`, as an index into `fields`.
+///
+/// This is the index the eager per-field scan would have flagged — the first position whose
+/// name already appeared earlier — but found in `O(n log n)` rather than `O(n²)`, without a
+/// hash map (the crate is `no_std` and its diagnostics must be deterministic).
+fn first_duplicate_field(fields: &[(String, BsnValueId)]) -> Option<usize> {
+    let mut order: Vec<usize> = (0..fields.len()).collect();
+    order.sort_unstable_by(|a, b| fields[*a].0.cmp(&fields[*b].0).then(a.cmp(b)));
+    // In name-then-index order, the later element of every adjacent equal-name pair is a
+    // repeat, and every repeat shows up as one; the earliest of them is the reported one.
+    order
+        .windows(2)
+        .filter(|pair| fields[pair[0]].0 == fields[pair[1]].0)
+        .map(|pair| pair[1])
+        .min()
 }
 
 /// Returns `true` if a flat entity body ends at `kind`.

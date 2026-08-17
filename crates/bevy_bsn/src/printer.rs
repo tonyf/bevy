@@ -4,6 +4,14 @@
 //! style, so tools can emit files that diff cleanly. Printing is *semantics preserving* but
 //! not *source preserving*: comments, layout, integer radix and raw-string delimiters are
 //! not carried by the AST and therefore do not survive a parse/print cycle.
+//!
+//! Two AST distinctions likewise have no text to survive in, and
+//! [`BsnDocument::structural_eq`] treats each pair as equal so that the round-trip property
+//! still holds for documents a builder can construct:
+//!
+//! - [`BsnValue::Unit`] and an empty [`BsnValue::Tuple`] both print as `()`.
+//! - Every `NaN` of a given sign prints as `NaN` or `-NaN`. The *sign* round-trips; a
+//!   non-canonical `NaN` *payload* does not, and comes back as the platform's quiet `NaN`.
 
 use alloc::{
     string::{String, ToString},
@@ -20,6 +28,17 @@ use crate::ast::{
 const INVALID: &str = "/* <invalid node id ";
 /// Emitted when a (necessarily hand-built) document nests deeper than [`MAX_WALK_DEPTH`].
 const TOO_DEEP: &str = "/* <nesting too deep> */";
+/// Emitted when a (necessarily hand-built) document exhausts the printer's visit budget.
+const OVER_BUDGET: &str = "/* <print budget exceeded> */";
+
+/// Value visits allowed per value node, on top of [`BUDGET_BASE`].
+///
+/// A legal tree is visited at most once per ancestor — the printer renders each body inline
+/// first and re-renders it broken across lines if it does not fit — so `depth + 1` visits per
+/// node bounds it, and the parser caps nesting at [`crate::MAX_NESTING_DEPTH`] (128).
+const BUDGET_PER_VALUE: usize = 256;
+/// Visits allowed regardless of document size, so tiny documents are never constrained.
+const BUDGET_BASE: usize = 1024;
 
 /// Formatting knobs for the printer.
 ///
@@ -52,6 +71,18 @@ impl Default for PrintOptions {
 ///
 /// Never fails and never panics: a malformed document (a dangling id, or a cycle) prints a
 /// `/* <invalid node id N> */` marker instead of aborting.
+///
+/// # Output is bounded
+///
+/// [`parse`](crate::parse) always produces a tree, but the builder API hands out
+/// [`BsnValueId`]s, so a hand-built document may share a value between several parents.
+/// Printing such a DAG expands it back into a tree, which is exponential in the number of
+/// value nodes. The printer therefore spends from a fixed budget of value visits —
+/// `values.len() * 256 + 1024`, computed once — and emits a
+/// `/* <print budget exceeded> */` marker instead of descending once it runs out. The budget
+/// is generous enough that no legal tree can reach it (a tree costs at most one visit per
+/// node per ancestor, and nesting is capped at [`MAX_NESTING_DEPTH`](crate::MAX_NESTING_DEPTH)),
+/// and it is consumed in a fixed traversal order, so the output stays deterministic.
 pub fn print_document(document: &BsnDocument) -> String {
     let mut out = String::new();
     let _ = write_document(document, &mut out);
@@ -77,6 +108,11 @@ pub fn write_document_with<W: core::fmt::Write>(
         options,
         value_stack: Vec::new(),
         node_stack: Vec::new(),
+        budget: document
+            .values
+            .len()
+            .saturating_mul(BUDGET_PER_VALUE)
+            .saturating_add(BUDGET_BASE),
     };
     out.write_str(&printer.document_text())
 }
@@ -106,10 +142,17 @@ pub(crate) fn escape_string(value: &str) -> String {
     out
 }
 
-/// Formats a float so that it re-parses as a float: `1.0`, `inf`, `-inf`, `NaN`.
+/// Formats a float so that it re-parses as a float: `1.0`, `inf`, `-inf`, `NaN`, `-NaN`.
+///
+/// The sign of a `NaN` is preserved, but its payload is not: every `NaN` with a given sign
+/// prints the same way and re-parses as the platform's canonical quiet `NaN`.
 pub(crate) fn format_float(value: f64) -> String {
     if value.is_nan() {
-        "NaN".to_string()
+        if value.is_sign_negative() {
+            "-NaN".to_string()
+        } else {
+            "NaN".to_string()
+        }
     } else if value == f64::INFINITY {
         "inf".to_string()
     } else if value == f64::NEG_INFINITY {
@@ -128,9 +171,22 @@ struct Printer<'a> {
     value_stack: Vec<BsnValueId>,
     /// Ids on the current entity recursion path, for the same reason.
     node_stack: Vec<BsnNodeId>,
+    /// Remaining value visits, so a shared (DAG) value cannot expand exponentially.
+    budget: usize,
 }
 
 impl Printer<'_> {
+    /// Charges one value visit to the budget, returning `false` once it is exhausted.
+    fn spend(&mut self) -> bool {
+        match self.budget.checked_sub(1) {
+            Some(remaining) => {
+                self.budget = remaining;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The whole document, ending with exactly one newline when non-empty.
     fn document_text(&mut self) -> String {
         let mut parts: Vec<String> = Vec::new();
@@ -264,6 +320,10 @@ impl Printer<'_> {
             out.push_str(TOO_DEEP);
             return;
         }
+        if !self.spend() {
+            out.push_str(OVER_BUDGET);
+            return;
+        }
         if self.value_stack.contains(&id) {
             out.push_str(TOO_DEEP);
             return;
@@ -345,6 +405,11 @@ impl Printer<'_> {
     fn inline_value(&mut self, id: BsnValueId, depth: u32) -> Option<String> {
         if depth > MAX_WALK_DEPTH || self.value_stack.contains(&id) {
             return None;
+        }
+        if !self.spend() {
+            // Not `None`: falling back to the multi-line path would keep descending, and the
+            // whole point of the budget is to stop.
+            return Some(OVER_BUDGET.to_string());
         }
         let document = self.document;
         let node = document.value(id)?;

@@ -12,6 +12,8 @@ extern crate alloc;
 #[cfg(feature = "std")]
 extern crate std;
 
+#[cfg(test)]
+mod adversarial;
 mod ast;
 mod error;
 mod lexer;
