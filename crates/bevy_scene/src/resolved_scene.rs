@@ -873,7 +873,14 @@ pub fn erased_template_as_partial_reflect<'a>(
 
     let type_id = (*template).type_id();
     let from_ptr = type_registry.get_type_data::<ReflectFromPtr>(type_id)?;
-    debug_assert_eq!(from_ptr.type_id(), type_id);
+    // A hard assert, not a debug assert: `TypeRegistration::insert` is safe public API, so safe
+    // code can register a `ReflectFromPtr` built for a different type. Reinterpreting through it
+    // would be type-confusion UB. Upstream precedent: `World::get_reflect` does the same.
+    assert_eq!(
+        from_ptr.type_id(),
+        type_id,
+        "Mismatch between the erased template's type_id and ReflectFromPtr's type_id"
+    );
     let ptr = core::ptr::from_ref::<dyn ErasedComponentTemplate>(template).cast::<u8>();
     // SAFETY: same argument as the `_mut` version below, with a shared borrow: `ptr` is the data
     // pointer of the `&'a` borrow of `template`, so it is non-null, aligned and valid for reads
@@ -899,7 +906,14 @@ pub fn erased_template_as_partial_reflect_mut<'a>(
 
     let type_id = (*template).type_id();
     let from_ptr = type_registry.get_type_data::<ReflectFromPtr>(type_id)?;
-    debug_assert_eq!(from_ptr.type_id(), type_id);
+    // A hard assert, not a debug assert: `TypeRegistration::insert` is safe public API, so safe
+    // code can register a `ReflectFromPtr` built for a different type. Reinterpreting through it
+    // would be type-confusion UB. Upstream precedent: `World::get_reflect` does the same.
+    assert_eq!(
+        from_ptr.type_id(),
+        type_id,
+        "Mismatch between the erased template's type_id and ReflectFromPtr's type_id"
+    );
     let ptr = core::ptr::from_mut::<dyn ErasedComponentTemplate>(template).cast::<u8>();
     // SAFETY:
     // - `ptr` is the data pointer of the `&'a mut` borrow of `template`, which the cast above

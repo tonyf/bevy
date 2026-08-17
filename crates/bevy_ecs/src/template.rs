@@ -115,6 +115,15 @@ impl SceneEntityReferences {
         }
     }
 
+    /// Iterates over every [`Entity`] this map resolved or materialized.
+    ///
+    /// This includes entities spawned by [`Self::get`] for forward references that no scene
+    /// entity ever claimed — scene bookkeeping (e.g. hot reload) must account for those too, or
+    /// they leak on every re-application.
+    pub fn iter(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.0.values().copied()
+    }
+
     /// Set the [`Entity`] associated with a [`SceneEntityReference`]
     pub fn set(&mut self, reference: SceneEntityReference, entity: Entity) {
         let inner = reference.0;
