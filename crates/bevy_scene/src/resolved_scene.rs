@@ -90,13 +90,10 @@ impl ResolvedSceneRoot {
     /// scene's previous generation, and are despawned before the scene is re-applied. See
     /// [`SceneInstanceState`], which stores the result.
     ///
-    /// # Limitation
-    ///
-    /// A `#Name` reference that is only ever used as a *component value*, and never names an entity
-    /// in the scene (`Reference(#Ghost)` with no `#Ghost` entity), materializes an empty entity
-    /// through [`SceneEntityReferences::get`] that is not recorded here, because
-    /// [`SceneEntityReferences`] does not expose its entries. Every related entity — i.e. every
-    /// descendant the scene actually describes, at any depth — is recorded.
+    /// Every entity the application creates is recorded: every related entity at any depth, and
+    /// every entity materialized for a `#Name` reference — including a forward reference that is
+    /// only ever used as a component value (`Reference(#Ghost)` with no `#Ghost` entity in the
+    /// scene). The instance root itself is never recorded, even when a reference resolves to it.
     ///
     /// [`SceneInstanceState`]: crate::SceneInstanceState
     pub fn apply_recording(
@@ -119,7 +116,7 @@ impl ResolvedSceneRoot {
         &self,
         entity: &mut EntityWorldMut,
         bundle_scratch: &mut BundleScratch,
-        recorder: SpawnRecorder,
+        mut recorder: SpawnRecorder,
     ) -> Result<(), ApplySceneError> {
         // A *fresh* map per apply is load-bearing: see `SceneEntityReference`'s `# Invariant`
         // section. References produced from a scene asset are identical for every spawn of that
@@ -127,7 +124,18 @@ impl ResolvedSceneRoot {
         let mut entity_references = SceneEntityReferences::default();
         let mut context = TemplateContext::new(entity, &mut entity_references);
 
-        let result = self.scene.apply(&mut context, bundle_scratch, recorder);
+        let result = self
+            .scene
+            .apply(&mut context, bundle_scratch, recorder.reborrow());
+
+        // Union the reference map into the record: a forward `#Name` used only as a component
+        // value materializes an entity through `SceneEntityReferences::get` that `apply_related`
+        // never sees. Without this, every re-application leaks one ghost entity per such
+        // reference. (Entities also recorded by `apply_related`, and a reference resolving to
+        // the root, are handled by the caller's sort/dedup/retain.)
+        for referenced in entity_references.iter() {
+            recorder.push(referenced);
+        }
         if !bundle_scratch.is_empty() {
             // SAFETY: Components comes from the same world as the `context` passed in to self.scene.apply above
             unsafe {

@@ -304,7 +304,7 @@ pub(crate) fn test_app() -> App {
 }
 
 /// Registers every fixture type on an [`App`].
-fn register_fixtures(app: &mut App) {
+pub(crate) fn register_fixtures(app: &mut App) {
     app.register_type::<Position>()
         .register_type::<Foo>()
         .register_type::<Bar>()

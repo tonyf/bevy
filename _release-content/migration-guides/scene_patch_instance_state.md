@@ -11,15 +11,17 @@ scene entities instead of orphaning them. It is added in the same archetype move
 
 `Commands::queue_spawn_scene`, `World::queue_spawn_scene` and `EntityWorldMut::queue_apply_scene`
 now insert `ScenePatchInstance` on the target entity rather than registering the queued spawn
-out-of-band. Spawning and application behaviour is unchanged, and these entities become
+out-of-band. Single-scene spawning behaviour is unchanged, and these entities become
 hot-reload-tracked as a result, but two things follow:
 
 - Code that asserted on an exact archetype or component count for these entities must account for
   the two additional components.
-- Calling `queue_apply_scene` twice on the *same* entity before the first application runs now
-  replaces the queued scene instead of applying both, because the second insert overwrites the
-  first `ScenePatchInstance`. Apply the scenes to different entities, or compose them into one
-  scene, if you relied on the old behaviour.
+- An entity is an instance of exactly *one* scene. Calling `queue_apply_scene` again on the same
+  entity (or replacing its `ScenePatchInstance`) now **replaces** the instance: the previous
+  application's spawned descendants are despawned before the new scene applies, exactly as on a
+  hot reload. Components the earlier scene added to the entity itself are not removed. Apply the
+  scenes to different entities, or compose them into one scene, if you relied on the old additive
+  behaviour.
 
 `resolve_scene_patches` now writes through `Assets::get_mut_untracked`, so resolving a scene no
 longer emits `AssetEvent::Modified` for its `ScenePatch`. `Modified` on a `ScenePatch` now means the

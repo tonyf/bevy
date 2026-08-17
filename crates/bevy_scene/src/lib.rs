@@ -1017,7 +1017,7 @@ impl Plugin for ScenePlugin {
                     .in_set(SceneSpawnerSystems::SceneSpawn)
                     .after(SceneSpawnerSystems::WorldInstanceSpawn),
             )
-            .add_observer(on_add_scene_patch_instance);
+            .add_observer(on_insert_scene_patch_instance);
 
         // String-literal sugar for reflection-driven scenes: `Name("player")` in a `.bsn` file
         // supplies a `String` where the field type is `HashedStr`. The `bsn!` macro covers this

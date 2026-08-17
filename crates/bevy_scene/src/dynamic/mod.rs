@@ -34,4 +34,6 @@ pub use scene::DynamicScene;
 pub use template::DynamicComponentTemplate;
 
 #[cfg(test)]
+mod attack;
+#[cfg(test)]
 mod tests;

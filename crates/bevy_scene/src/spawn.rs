@@ -208,7 +208,7 @@ impl WorldSceneExt for World {
         let patch = ScenePatch::load(assets, scene);
         let handle = assets.add(patch);
         // Inserting the component (rather than pushing to `QueuedScenes` by hand) queues the spawn
-        // through `on_add_scene_patch_instance`, which does exactly the same push — and makes the
+        // through `on_insert_scene_patch_instance`, which does exactly the same push — and makes the
         // entity hot-reload-tracked, which matters for scenes that include a `.bsn` base.
         self.spawn(ScenePatchInstance(handle))
     }
@@ -796,7 +796,23 @@ fn apply_to_instance(
     resolved: &ResolvedSceneRoot,
     bundle_scratch: &mut BundleScratch,
 ) -> Result<(), ApplySceneError> {
-    let mut spawned = Vec::new();
+    // Despawn the previous generation first: an instance is exactly one scene's content, so any
+    // re-application — a reload, a replaced `ScenePatchInstance`, or a remove-and-re-insert —
+    // must not orphan the entities the previous application spawned (the #24939 ghost class).
+    // Entities already gone (e.g. despawned recursively via `Children`) fall through the
+    // `get_entity_mut` check as no-ops.
+    let mut spawned = world
+        .get_mut::<SceneInstanceState>(entity)
+        .map(|mut state| core::mem::take(&mut state.spawned))
+        .unwrap_or_default();
+    for previous in spawned.drain(..) {
+        if let Ok(entity_mut) = world.get_entity_mut(previous) {
+            // Despawning is recursive through linked-spawn relationships such as `Children`,
+            // so descendants added at runtime go too. That is the documented state loss.
+            entity_mut.despawn();
+        }
+    }
+
     let result = {
         let Ok(mut entity_mut) = world.get_entity_mut(entity) else {
             return Ok(());
@@ -805,10 +821,8 @@ fn apply_to_instance(
             // Set before applying: if the apply fails half way, the instance is still "live" and
             // whatever landed in `spawned` must still be cleaned up by the next reload.
             state.applied = true;
-            // Reuse the previous application's allocation.
-            spawned = core::mem::take(&mut state.spawned);
-            spawned.clear();
         }
+        // `spawned` reuses the previous application's allocation.
         resolved.apply_recording(&mut entity_mut, bundle_scratch, &mut spawned)
     };
 
@@ -872,18 +886,7 @@ fn reapply_instances(
             continue;
         };
 
-        let previous = world
-            .get_mut::<SceneInstanceState>(entity)
-            .map(|mut state| core::mem::take(&mut state.spawned))
-            .unwrap_or_default();
-        for spawned in previous {
-            if let Ok(entity_mut) = world.get_entity_mut(spawned) {
-                // Despawning is recursive through linked-spawn relationships such as `Children`,
-                // so descendants added at runtime go too. That is the documented state loss.
-                entity_mut.despawn();
-            }
-        }
-
+        // `apply_to_instance` despawns the previous generation itself.
         if let Err(err) = apply_to_instance(world, entity, &resolved, bundle_scratch) {
             error!(
                 "Failed to re-apply reloaded scene (id: {instance_id}) to entity {entity}: {err}"
@@ -913,16 +916,20 @@ pub(crate) struct RelatedSceneListSpawn {
     insert: fn(&mut EntityWorldMut, target: Entity),
 }
 
-/// An [`Observer`] system that queues newly added [`ScenePatchInstance`] entities.
-pub fn on_add_scene_patch_instance(
-    add: On<Add, ScenePatchInstance>,
+/// An [`Observer`] system that queues newly added or replaced [`ScenePatchInstance`] entities.
+///
+/// This watches `Insert`, not `Add`: replacing the component (for example a second
+/// [`queue_apply_scene`](EntityWorldMutSceneExt::queue_apply_scene) on the same entity) must
+/// re-queue the instance, and `Add` does not fire when the component is already present.
+pub fn on_insert_scene_patch_instance(
+    insert: On<Insert, ScenePatchInstance>,
     mut queued_scenes: ResMut<QueuedScenes>,
     instances: Query<&ScenePatchInstance>,
 ) {
-    if let Ok(instance) = instances.get(add.entity) {
+    if let Ok(instance) = instances.get(insert.entity) {
         queued_scenes
             .new_scene_entities
-            .push((add.entity, instance.0.clone()));
+            .push((insert.entity, instance.0.clone()));
     }
 }
 
@@ -1104,7 +1111,7 @@ impl QueuedScenes {
 
 #[cfg(test)]
 mod tests {
-    use super::{EntityWorldMutSceneExt, WorldSceneExt};
+    use super::{EntityCommandsSceneExt, EntityWorldMutSceneExt, WorldSceneExt};
     use crate::ScenePlugin;
     use crate::{
         self as bevy_scene, bsn, Scene, SceneInstanceState, ScenePatch, ScenePatchInstance,
@@ -1197,7 +1204,27 @@ mod tests {
 
     /// The in-memory "disk" behind [`FakeSceneLoader`], shared with the test body.
     #[derive(Clone, Default)]
-    struct FakeScenes(Arc<Mutex<HashMap<String, FakeSource>>>);
+    struct FakeScenes(
+        Arc<Mutex<HashMap<String, FakeSource>>>,
+        /// Paths whose loader must stall until released. Used to control which of two concurrent
+        /// reload tasks finishes first.
+        Arc<Mutex<Vec<String>>>,
+    );
+
+    impl FakeScenes {
+        /// Makes `path`'s loader stall until [`FakeScenes::unblock`].
+        fn block(&self, path: &str) {
+            self.1.lock().unwrap().push(path.to_string());
+        }
+
+        fn unblock(&self, path: &str) {
+            self.1.lock().unwrap().retain(|p| p != path);
+        }
+
+        fn is_blocked(&self, path: &str) -> bool {
+            self.1.lock().unwrap().iter().any(|p| p == path)
+        }
+    }
 
     impl FakeScenes {
         /// Writes `scene_fn` to `path`, overwriting whatever was there before. This is the
@@ -1233,6 +1260,13 @@ mod tests {
             load_context: &mut bevy_asset::LoadContext<'_>,
         ) -> Result<Self::Asset, Self::Error> {
             let path = load_context.path().path().to_string_lossy().into_owned();
+            // Bounded so a single-threaded task pool can never hang the suite.
+            for _ in 0..2000 {
+                if !self.0.is_blocked(&path) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
             let scene = {
                 let scenes = self.0 .0.lock().unwrap();
                 match scenes.get(&path) {
@@ -1767,5 +1801,501 @@ mod tests {
             .unwrap()
             .id();
         assert!(app.world().get::<SceneInstanceState>(root).is_none());
+    }
+
+    // =======================================================================================
+    // ADVERSARIAL REVIEW REPROS
+    // =======================================================================================
+
+    #[derive(Component, FromTemplate)]
+    struct Reference(Entity);
+
+    /// ADV-1: `queue_apply_scene` twice on the same entity.
+    ///
+    /// D-7 replaced the manual `QueuedScenes` push with `entity.insert(ScenePatchInstance(..))`.
+    /// Inserting over an existing component does not fire `Add`, so the observer never runs and
+    /// the second scene is silently dropped.
+    #[test]
+    fn adv1_queue_apply_scene_twice() {
+        let mut app = test_app();
+        let root = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .entity_mut(root)
+            .queue_apply_scene(bsn! { HotMarker });
+        app.world_mut()
+            .entity_mut(root)
+            .queue_apply_scene(bsn! { Position { x: 3. } });
+        for _ in 0..5 {
+            app.update();
+        }
+        assert!(
+            app.world().get::<HotMarker>(root).is_some(),
+            "first queued scene applied"
+        );
+        assert!(
+            app.world().get::<Position>(root).is_some(),
+            "second queued scene must also be applied"
+        );
+    }
+
+    /// ADV-1b: the realistic composition — spawn an entity from one scene, then queue a second
+    /// scene onto it. The second is silently dropped for the same reason.
+    #[test]
+    fn adv1b_queue_apply_scene_onto_queue_spawned_entity() {
+        let mut app = test_app();
+        let root = app.world_mut().queue_spawn_scene(bsn! { HotMarker }).id();
+        app.world_mut()
+            .entity_mut(root)
+            .queue_apply_scene(bsn! { Position { x: 3. } });
+        for _ in 0..5 {
+            app.update();
+        }
+        assert!(app.world().get::<HotMarker>(root).is_some());
+        assert!(
+            app.world().get::<Position>(root).is_some(),
+            "a scene queued onto an existing instance entity must still be applied"
+        );
+    }
+
+    /// ADV-2: forward `#Name` references used only as component values leak an entity on every
+    /// reload. `apply_recording` only records related entities, not entities materialized by
+    /// `SceneEntityReferences::get`, so nothing ever despawns them.
+    #[test]
+    fn adv2_ghost_reference_entities_leak_on_reload() {
+        let scenes = FakeScenes::default();
+        scenes.write("a.fakescene", || bsn! { Reference(#Ghost) });
+        let mut app = hot_reload_app(&scenes, &["a.fakescene"]);
+
+        let handle = load_and_settle(&mut app, "a.fakescene");
+        let before = app.world().entities().count_spawned();
+        let root = app.world_mut().spawn(ScenePatchInstance(handle)).id();
+        run_app_until(&mut app, |app| app.world().get::<Reference>(root).is_some());
+        // root + the materialized ghost entity
+        let after_first = app.world().entities().count_spawned();
+        assert_eq!(after_first, before + 2, "root + one ghost entity");
+        let first_ghost = app.world().get::<Reference>(root).unwrap().0;
+
+        for i in 0..5 {
+            let x = i as f32;
+            scenes.write("a.fakescene", move || {
+                bsn! { Reference(#Ghost) Position { x: x } }
+            });
+            reload(&app, "a.fakescene");
+            run_app_until(&mut app, |app| {
+                app.world().get::<Position>(root).map(|p| p.x) == Some(x)
+            });
+        }
+
+        let second_ghost = app.world().get::<Reference>(root).unwrap().0;
+        assert_ne!(first_ghost, second_ghost, "a fresh map spawns a new ghost");
+        assert_eq!(
+            app.world().entities().count_spawned(),
+            before + 2,
+            "reloading must not grow the entity count (5 reloads happened)"
+        );
+        assert!(
+            app.world().get_entity(first_ghost).is_err(),
+            "the previous generation's ghost entity must be despawned, not leaked"
+        );
+        assert_eq!(
+            app.world().entities().count_spawned(),
+            before + 2,
+            "reloading must not grow the entity count"
+        );
+    }
+
+    /// ADV-3: re-adding `ScenePatchInstance` (the natural way to swap which scene an entity is an
+    /// instance of) applies the new scene without despawning the previous generation — the
+    /// #24939 ghost, on a path the new bookkeeping does not cover. The old entities are also
+    /// dropped from `spawned`, so no later reload can ever clean them up.
+    #[test]
+    fn adv3_reinserting_scene_patch_instance_orphans_previous_generation() {
+        let scenes = FakeScenes::default();
+        scenes.write("a.fakescene", || bsn! { Children [ #A, #B ] });
+        scenes.write("b.fakescene", || bsn! { Children [ #C ] });
+        let mut app = hot_reload_app(&scenes, &["a.fakescene", "b.fakescene"]);
+
+        let a = load_and_settle(&mut app, "a.fakescene");
+        let b = load_and_settle(&mut app, "b.fakescene");
+        let before = app.world().entities().count_spawned();
+        let root = app.world_mut().spawn(ScenePatchInstance(a)).id();
+        run_app_until(&mut app, |app| child_names(app, root) == ["A", "B"]);
+        let previous: Vec<Entity> = app
+            .world()
+            .get::<Children>(root)
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>();
+
+        app.world_mut()
+            .entity_mut(root)
+            .remove::<ScenePatchInstance>();
+        app.world_mut()
+            .entity_mut(root)
+            .insert(ScenePatchInstance(b));
+        run_app_until(&mut app, |app| child_names(app, root) == ["C"]);
+
+        for entity in previous {
+            assert!(
+                app.world().get_entity(entity).is_err(),
+                "swapping the scene must not orphan the previous generation"
+            );
+        }
+        assert_eq!(
+            app.world().entities().count_spawned(),
+            before + 2,
+            "root + the one child of the new scene"
+        );
+    }
+
+    /// ADV-4: a scene-spawned child that itself carries a `ScenePatchInstance`. Reloading the
+    /// *inner* asset must not desync the outer instance's bookkeeping, and reloading the outer
+    /// one must clean up everything.
+    #[test]
+    fn adv4_nested_instance_reload() {
+        let scenes = FakeScenes::default();
+        scenes.write("inner.fakescene", || bsn! { Children [ #I1 ] });
+        let mut app = hot_reload_app(&scenes, &["inner.fakescene", "outer.fakescene"]);
+        let inner = load_and_settle(&mut app, "inner.fakescene");
+
+        let outer_handle = inner.clone();
+        scenes.write("outer.fakescene", move || {
+            let h = outer_handle.clone();
+            bsn! { Children [ (#Nested ScenePatchInstance(h)) ] }
+        });
+        let outer = load_and_settle(&mut app, "outer.fakescene");
+
+        let before = app.world().entities().count_spawned();
+        let root = app.world_mut().spawn(ScenePatchInstance(outer)).id();
+        run_app_until(&mut app, |app| {
+            app.world()
+                .get::<Children>(root)
+                .and_then(|c| app.world().get::<Children>(c[0]))
+                .is_some()
+        });
+        // root + nested child + inner's child
+        assert_eq!(app.world().entities().count_spawned(), before + 3);
+
+        // Reload the inner asset: the nested instance rebuilds itself.
+        scenes.write("inner.fakescene", || bsn! { Children [ #I2 ] });
+        reload(&app, "inner.fakescene");
+        run_app_until(&mut app, |app| {
+            let nested = app.world().get::<Children>(root).unwrap()[0];
+            child_names(app, nested) == ["I2"]
+        });
+        assert_eq!(
+            app.world().entities().count_spawned(),
+            before + 3,
+            "an inner reload must not leak"
+        );
+
+        // Now reload the outer asset: everything below the root is rebuilt.
+        let inner2 = inner.clone();
+        scenes.write("outer.fakescene", move || {
+            let h = inner2.clone();
+            bsn! { Children [ (#Nested2 ScenePatchInstance(h)) ] }
+        });
+        reload(&app, "outer.fakescene");
+        run_app_until(&mut app, |app| {
+            child_names(app, root) == ["Nested2"]
+                && app
+                    .world()
+                    .get::<Children>(app.world().get::<Children>(root).unwrap()[0])
+                    .is_some()
+        });
+        for _ in 0..10 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().entities().count_spawned(),
+            before + 3,
+            "an outer reload must clean up the nested instance's entities too"
+        );
+    }
+
+    /// ADV-5: manually despawning a recorded child and then reloading must not panic or leave the
+    /// world inconsistent.
+    #[test]
+    fn adv5_manual_despawn_of_recorded_child_then_reload() {
+        let scenes = FakeScenes::default();
+        scenes.write("a.fakescene", || bsn! { Children [ #A, #B ] });
+        let mut app = hot_reload_app(&scenes, &["a.fakescene"]);
+
+        let handle = load_and_settle(&mut app, "a.fakescene");
+        let before = app.world().entities().count_spawned();
+        let root = app.world_mut().spawn(ScenePatchInstance(handle)).id();
+        run_app_until(&mut app, |app| child_names(app, root) == ["A", "B"]);
+        let child = app.world().get::<Children>(root).unwrap()[0];
+        app.world_mut().entity_mut(child).despawn();
+
+        scenes.write("a.fakescene", || bsn! { Children [ #C ] });
+        reload(&app, "a.fakescene");
+        run_app_until(&mut app, |app| child_names(app, root) == ["C"]);
+        assert_eq!(app.world().entities().count_spawned(), before + 2);
+    }
+
+    /// ADV-6: a base and its dependent reload in the same frame, with the dependent's loader
+    /// finishing first (saving two files at once, a `git checkout`, an editor "save all").
+    ///
+    /// `resolve_scene_patches` processes `LoadedWithDependencies` in message order. If the
+    /// dependent is resolved before its base, the base's freshly-replaced `ScenePatch` still has
+    /// `resolved: None`, so `get_or_insert_erased_template_index` takes the `default()` branch
+    /// instead of the copy-on-write clone. The overlapping component is then written twice — base's
+    /// whole value, then the dependent's whole value — instead of being field-merged, and the
+    /// mis-resolution is cached until the dependent is reloaded again.
+    #[test]
+    fn adv6_base_and_dependent_reload_out_of_order() {
+        let scenes = FakeScenes::default();
+        scenes.write("base.fakescene", || bsn! { Position { x: 1., y: 1. } });
+        scenes.write("derived.fakescene", || {
+            bsn! { :"base.fakescene" Position { x: 2. } }
+        });
+        let mut app = hot_reload_app(&scenes, &["base.fakescene", "derived.fakescene"]);
+
+        let handle = load_and_settle(&mut app, "derived.fakescene");
+        let root = app.world_mut().spawn(ScenePatchInstance(handle)).id();
+        run_app_until(&mut app, |app| app.world().get::<Position>(root).is_some());
+        assert_eq!(
+            *app.world().get::<Position>(root).unwrap(),
+            Position { x: 2., y: 1. }
+        );
+
+        scenes.write("base.fakescene", || bsn! { Position { x: 1., y: 9. } });
+        scenes.write("derived.fakescene", || {
+            bsn! { :"base.fakescene" Position { x: 2. } }
+        });
+        // Hold the base's loader so the dependent's reload task completes (and queues its event)
+        // first, then release it so both land in the same `handle_internal_asset_events` drain.
+        scenes.block("base.fakescene");
+        reload(&app, "base.fakescene");
+        reload(&app, "derived.fakescene");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        scenes.unblock("base.fakescene");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        for _ in 0..50 {
+            app.update();
+        }
+
+        assert_eq!(
+            *app.world().get::<Position>(root).unwrap(),
+            Position { x: 2., y: 9. },
+            "the dependent must field-merge over the new base regardless of resolve order"
+        );
+    }
+
+    /// ADV-7: a reload that fails to resolve, followed by one that succeeds. The failed resolve
+    /// leaves `scene: None` / `resolved: None` on the new value; recovery must be clean.
+    #[test]
+    fn adv7_failed_reload_then_successful_reload_recovers() {
+        let scenes = FakeScenes::default();
+        scenes.write(
+            "a.fakescene",
+            || bsn! { Position { x: 1. } Children [ #A ] },
+        );
+        let mut app = hot_reload_app(&scenes, &["a.fakescene"]);
+
+        let handle = load_and_settle(&mut app, "a.fakescene");
+        let before = app.world().entities().count_spawned();
+        let root = app.world_mut().spawn(ScenePatchInstance(handle)).id();
+        run_app_until(&mut app, |app| app.world().get::<Position>(root).is_some());
+
+        scenes.write_parse_error("a.fakescene");
+        reload(&app, "a.fakescene");
+        for _ in 0..20 {
+            app.update();
+        }
+        assert_eq!(app.world().get::<Position>(root).unwrap().x, 1.);
+
+        scenes.write(
+            "a.fakescene",
+            || bsn! { Position { x: 7. } Children [ #B ] },
+        );
+        reload(&app, "a.fakescene");
+        run_app_until(&mut app, |app| {
+            app.world().get::<Position>(root).unwrap().x == 7.
+        });
+        assert_eq!(child_names(&app, root), ["B"]);
+        assert_eq!(
+            app.world().entities().count_spawned(),
+            before + 2,
+            "recovery must not leak the broken generation"
+        );
+    }
+
+    /// ADV-8: reloading an asset with no live instances, then spawning an instance of it.
+    #[test]
+    fn adv8_reload_without_instances_then_spawn() {
+        let scenes = FakeScenes::default();
+        scenes.write("a.fakescene", || bsn! { Position { x: 1. } });
+        let mut app = hot_reload_app(&scenes, &["a.fakescene"]);
+        let handle = load_and_settle(&mut app, "a.fakescene");
+
+        scenes.write("a.fakescene", || bsn! { Position { x: 5. } });
+        reload(&app, "a.fakescene");
+        run_app_until(&mut app, |app| {
+            app.world()
+                .resource::<Assets<ScenePatch>>()
+                .get(&handle)
+                .and_then(|p| p.resolved.as_ref())
+                .is_some()
+        });
+        for _ in 0..10 {
+            app.update();
+        }
+
+        let root = app.world_mut().spawn(ScenePatchInstance(handle)).id();
+        run_app_until(&mut app, |app| app.world().get::<Position>(root).is_some());
+        assert_eq!(app.world().get::<Position>(root).unwrap().x, 5.);
+    }
+
+    /// ADV-9: three-level chain `top : mid : base`. Reloading `base` must update the top-level
+    /// instance's merged component, transitively.
+    #[test]
+    fn adv9_three_level_chain_reload_of_base() {
+        let scenes = FakeScenes::default();
+        scenes.write("base.fakescene", || bsn! { Position { x: 1., y: 1. } });
+        scenes.write("mid.fakescene", || {
+            bsn! { :"base.fakescene" Position { y: 2. } }
+        });
+        scenes.write("top.fakescene", || {
+            bsn! { :"mid.fakescene" Position { x: 3. } }
+        });
+        let mut app = hot_reload_app(
+            &scenes,
+            &["base.fakescene", "mid.fakescene", "top.fakescene"],
+        );
+
+        let handle = load_and_settle(&mut app, "top.fakescene");
+        let root = app.world_mut().spawn(ScenePatchInstance(handle)).id();
+        run_app_until(&mut app, |app| app.world().get::<Position>(root).is_some());
+        assert_eq!(
+            *app.world().get::<Position>(root).unwrap(),
+            Position { x: 3., y: 2. }
+        );
+
+        // `base` no longer sets x; `mid` still sets y. The top-level patch's x must win, and the
+        // whole chain must be re-resolved so nothing is stale.
+        scenes.write("base.fakescene", || bsn! { Position { x: 8., y: 8. } });
+        reload(&app, "base.fakescene");
+        for _ in 0..60 {
+            app.update();
+        }
+        assert_eq!(
+            *app.world().get::<Position>(root).unwrap(),
+            Position { x: 3., y: 2. },
+            "a three-level chain must stay correctly merged after the bottom reloads"
+        );
+    }
+
+    /// ADV-10: the instance entity is despawned in the same frame the reload lands.
+    #[test]
+    fn adv10_instance_despawned_with_reload_pending() {
+        let scenes = FakeScenes::default();
+        scenes.write("a.fakescene", || bsn! { Children [ #A ] });
+        let mut app = hot_reload_app(&scenes, &["a.fakescene"]);
+
+        let handle = load_and_settle(&mut app, "a.fakescene");
+        let before = app.world().entities().count_spawned();
+        let keep = app
+            .world_mut()
+            .spawn(ScenePatchInstance(handle.clone()))
+            .id();
+        let doomed = app.world_mut().spawn(ScenePatchInstance(handle)).id();
+        run_app_until(&mut app, |app| {
+            app.world().get::<Children>(doomed).is_some()
+        });
+
+        scenes.write("a.fakescene", || bsn! { Children [ #B ] });
+        reload(&app, "a.fakescene");
+        // Despawn one instance while the reload is in flight.
+        app.world_mut().entity_mut(doomed).despawn();
+        run_app_until(&mut app, |app| child_names(app, keep) == ["B"]);
+        for _ in 0..10 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().entities().count_spawned(),
+            before + 2,
+            "the surviving instance plus its one child"
+        );
+    }
+
+    /// ADV-11: `AssetEvent::Removed` for a scene that still has live instances, followed by a
+    /// fresh load of the same path.
+    #[test]
+    fn adv11_removed_then_reloaded() {
+        let scenes = FakeScenes::default();
+        scenes.write("a.fakescene", || bsn! { Position { x: 1. } });
+        let mut app = hot_reload_app(&scenes, &["a.fakescene"]);
+
+        let handle = load_and_settle(&mut app, "a.fakescene");
+        let root = app
+            .world_mut()
+            .spawn(ScenePatchInstance(handle.clone()))
+            .id();
+        run_app_until(&mut app, |app| app.world().get::<Position>(root).is_some());
+
+        // Drop every strong handle except the instance's, then remove the asset outright.
+        let id = handle.id();
+        drop(handle);
+        app.world_mut()
+            .resource_mut::<Assets<ScenePatch>>()
+            .remove(id);
+        for _ in 0..10 {
+            app.update();
+        }
+        assert_eq!(
+            app.world().get::<Position>(root).unwrap().x,
+            1.,
+            "removing the asset leaves the last applied content in place"
+        );
+    }
+
+    /// ADV-12: a scene applied to an instance queues another scene from inside the apply, while a
+    /// reload of the outer asset is being processed in the same `spawn_queued` call.
+    #[test]
+    fn adv12_queue_from_within_apply_during_reload() {
+        let scenes = FakeScenes::default();
+        scenes.write("a.fakescene", || bsn! { Children [ #A ] });
+        let mut app = hot_reload_app(&scenes, &["a.fakescene"]);
+        let handle = load_and_settle(&mut app, "a.fakescene");
+        let before = app.world().entities().count_spawned();
+
+        let root = app.world_mut().spawn(ScenePatchInstance(handle)).id();
+        run_app_until(&mut app, |app| child_names(app, root) == ["A"]);
+
+        // An observer that reacts to the new generation of children by queueing another scene.
+        app.world_mut()
+            .add_observer(|add: On<Add, Name>, mut commands: Commands| {
+                commands
+                    .entity(add.entity)
+                    .queue_apply_scene(bsn! { HotMarker });
+            });
+
+        scenes.write("a.fakescene", || bsn! { Children [ #B, #C ] });
+        reload(&app, "a.fakescene");
+        run_app_until(&mut app, |app| child_names(app, root) == ["B", "C"]);
+        for _ in 0..10 {
+            app.update();
+        }
+
+        let children: Vec<Entity> = app
+            .world()
+            .get::<Children>(root)
+            .unwrap()
+            .iter()
+            .collect::<Vec<_>>();
+        for child in &children {
+            assert!(
+                app.world().get::<HotMarker>(*child).is_some(),
+                "a scene queued from inside an apply must still be applied"
+            );
+        }
+        assert_eq!(
+            app.world().entities().count_spawned(),
+            // +1 for the observer entity itself.
+            before + 4,
+            "root + two children (+ the observer entity)"
+        );
     }
 }
