@@ -1,0 +1,8 @@
+target/
+artifacts/
+coverage/
+# The evolved corpus is machine-generated noise; only the curated seeds are tracked.
+corpus/**
+!corpus/*/
+!corpus/*/seed_*.bsn
+!corpus/*/shipped_*.bsn

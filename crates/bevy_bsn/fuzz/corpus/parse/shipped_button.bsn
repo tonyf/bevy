@@ -1,0 +1,25 @@
+// A reusable button.
+//
+// Included from Rust with `bsn! { :"scenes/dynamic_bsn_button.bsn" }`, and from another `.bsn`
+// file with `:"scenes/dynamic_bsn_button.bsn"`. Include paths are relative to the asset root,
+// never to the file that names them.
+//
+// Type paths may be written in full (`bevy_ui::ui_node::Node`) or, when the short name is
+// unambiguous in the type registry, short (`Node`). This file uses the short form.
+Node {
+    width: Val::Px(180.0),
+    height: Val::Px(56.0),
+    justify_content: JustifyContent::Center,
+    align_items: AlignItems::Center,
+}
+// `.bsn` has no access to Rust items, so there are no constants (`Color::WHITE`) and no
+// constructor calls (`Color::srgb(...)`): colors are written out as struct literals.
+BackgroundColor(Color::Srgba(Srgba {
+    red: 0.15,
+    green: 0.15,
+    blue: 0.15,
+    alpha: 1.0,
+}))
+Children [
+    (#Label Text("Button"))
+]

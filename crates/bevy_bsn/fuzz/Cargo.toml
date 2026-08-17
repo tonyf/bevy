@@ -1,0 +1,42 @@
+[package]
+name = "bevy_bsn-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bevy_bsn = { path = ".." }
+
+# A cargo-fuzz crate is its own workspace by convention: it needs nightly + libFuzzer
+# and must not affect the root workspace's dependency graph (bevy_bsn itself asserts a
+# dependency-free manifest in its hygiene tests).
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "render"
+path = "fuzz_targets/render.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

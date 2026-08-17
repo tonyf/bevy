@@ -1,0 +1,2 @@
+Widget { display: Display::Flex, dir: FlexDirection::Column }
+Children [ (Inner::Variant { a: 1 }), (Tup::V(1, 2)) ]

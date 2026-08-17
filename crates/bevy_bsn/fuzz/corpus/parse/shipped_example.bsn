@@ -1,0 +1,32 @@
+// The root scene of the `dynamic_bsn` example.
+//
+// Loaded with `asset_server.load::<ScenePatch>("scenes/dynamic_bsn_example.bsn")` and spawned by
+// putting the resulting handle in a `ScenePatchInstance`.
+#Root
+Node {
+    width: Val::Percent(100.0),
+    height: Val::Percent(100.0),
+    flex_direction: FlexDirection::Column,
+    align_items: AlignItems::Center,
+    justify_content: JustifyContent::Center,
+    row_gap: Val::Px(16.0),
+}
+Children [
+    (
+        #Logo
+        // A string in a `Handle` field becomes an asset dependency: this scene is not spawned
+        // until the image has loaded too.
+        ImageNode { image: "branding/bevy_logo_dark.png" }
+        Node { width: Val::Px(320.0) }
+    ),
+    (
+        #Title
+        Text("Loaded from dynamic_bsn_example.bsn")
+        TextColor(Color::Srgba(Srgba {
+            red: 0.95,
+            green: 0.95,
+            blue: 0.95,
+            alpha: 1.0,
+        }))
+    ),
+]

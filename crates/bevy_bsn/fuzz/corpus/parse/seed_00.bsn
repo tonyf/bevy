@@ -1,0 +1,3 @@
+#Root
+A { x: 1.0, y: -2 }
+Children [ B, (C #Kid D(1, "s")) ]
