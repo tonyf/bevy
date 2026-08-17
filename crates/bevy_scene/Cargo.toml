@@ -35,10 +35,18 @@ thiserror = { version = "2", default-features = false }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 variadics_please = "2.0"
 
+[dev-dependencies]
+proptest = "1"
+
 [lints]
 workspace = true
 
 [[test]]
 name = "dynamic_bsn"
 path = "tests/dynamic_bsn.rs"
+required-features = ["bsn_asset"]
+
+[[test]]
+name = "dynamic_bsn_property"
+path = "tests/dynamic_bsn_property.rs"
 required-features = ["bsn_asset"]
