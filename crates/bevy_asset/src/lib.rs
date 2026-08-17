@@ -702,8 +702,15 @@ impl AssetApp for App {
             type_registry.register_type_data::<Handle<A>, ReflectHandle>();
             type_registry.register_type_data::<Handle<A>, ReflectFromTemplate>();
             type_registry.register_type_data::<HandleTemplate<A>, ReflectTemplate>();
-            type_registry
-                .register_type_conversion::<String, HandleTemplate<A>, _>(|s| Ok(s.into()));
+            type_registry.register_type_conversion::<String, HandleTemplate<A>, _>(|s| {
+                // Validate before converting: `HandleTemplate: From<String>` goes through
+                // `AssetPath::parse`, which panics on malformed paths, and conversion inputs
+                // are user data (e.g. `.bsn` file strings).
+                match AssetPath::try_parse(&s) {
+                    Ok(path) => Ok(HandleTemplate::Path(path.into_owned())),
+                    Err(_) => Err(s),
+                }
+            });
         }
 
         self
