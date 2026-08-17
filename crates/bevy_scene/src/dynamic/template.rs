@@ -93,8 +93,21 @@ impl ErasedComponentTemplate for DynamicComponentTemplate {
         //    lock the registry itself, and a re-entrant read can deadlock behind a queued writer.
         let output: Box<dyn Reflect> = match &self.reflect_template {
             Some(reflect_template) => (reflect_template.build_template)(&*self.value, context)?,
-            // No `ReflectTemplate` means the output type *is* the template type.
-            None => self.value.reflect_clone()?,
+            // No `ReflectTemplate` means the output type *is* the template type. A bare
+            // `reflect_clone` is not enough here: it refuses `#[reflect(ignore)]` fields and
+            // opaque fields without a registered clone, all of which spawn fine through the
+            // static `bsn!` path (which uses real `Clone`). Fall back to `ReflectFromReflect`,
+            // which reads the reflected fields and defaults the ignored ones.
+            None => match self.value.reflect_clone() {
+                Ok(value) => value,
+                Err(clone_error) => self
+                    .reflect_from_reflect
+                    .as_ref()
+                    .and_then(|from_reflect| {
+                        from_reflect.from_reflect(self.value.as_partial_reflect())
+                    })
+                    .ok_or(clone_error)?,
+            },
         };
 
         // 2. The guard comes from our own handle, so it is independent of any borrow of `context`.

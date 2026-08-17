@@ -197,6 +197,10 @@ fn resolve_entity(
         let related = scene.get_or_insert_related_resolved_scenes_erased(&relation.data);
         let mut result = Ok(());
         for child in &relation.children {
+            // Reset per child, not just per relation block: a child with its own base sets
+            // `context.cached` (via `CachedSceneAsset::resolve`) and nothing restores it, so a
+            // later sibling would otherwise resolve against a cached scene it does not own.
+            context.cached = None;
             let mut child_scene = ResolvedScene::default();
             result = resolve_entity(child, registry, context, &mut child_scene);
             if result.is_err() {

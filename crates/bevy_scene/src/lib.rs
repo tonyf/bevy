@@ -958,6 +958,17 @@ impl Plugin for ScenePlugin {
                     .after(SceneSpawnerSystems::WorldInstanceSpawn),
             )
             .add_observer(on_add_scene_patch_instance);
+
+        // String-literal sugar for reflection-driven scenes: `Name("player")` in a `.bsn` file
+        // supplies a `String` where the field type is `HashedStr`. The `bsn!` macro covers this
+        // with an implicit `.into()`; the reflection path needs the conversion registered.
+        {
+            let mut registry = app.world().resource::<AppTypeRegistry>().write();
+            registry.register::<String>();
+            registry.register::<bevy_ecs::name::HashedStr>();
+            registry
+                .register_type_conversion::<String, bevy_ecs::name::HashedStr, _>(|s| Ok(s.into()));
+        }
     }
 }
 

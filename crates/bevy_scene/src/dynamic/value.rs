@@ -291,17 +291,25 @@ fn build_string(
         return Ok(Box::new(asset_path(literal, span)?));
     }
 
+    // The destination is a template whose output is a `Handle<A>`. Validate the path *before*
+    // coercing — the registered `String → HandleTemplate` conversion rejects malformed paths, and
+    // reporting `InvalidAssetPath` with this literal's span beats the generic coercion mismatch.
+    let handle_asset_type = expected
+        .data::<ReflectTemplate>()
+        .and_then(|reflect_template| cx.registry.get(reflect_template.output_type_id))
+        .and_then(|output| output.data::<ReflectHandle>())
+        .map(ReflectHandle::asset_type_id);
+    let path = match handle_asset_type {
+        Some(_) => Some(asset_path(literal, span)?),
+        None => None,
+    };
+
     let converted = coerce(Box::new(literal.to_string()), expected, span)?;
 
-    // The destination is a template whose output is a `Handle<A>`: record the asset dependency so
-    // that the `.bsn`'s assets are load-context dependencies of the scene rather than being loaded
-    // lazily at spawn time.
-    if let Some(reflect_template) = expected.data::<ReflectTemplate>()
-        && let Some(output) = cx.registry.get(reflect_template.output_type_id)
-        && let Some(handle) = output.data::<ReflectHandle>()
-    {
-        cx.dependencies
-            .push((handle.asset_type_id(), asset_path(literal, span)?));
+    // Record the asset dependency so that the `.bsn`'s assets are load-context dependencies of
+    // the scene rather than being loaded lazily at spawn time.
+    if let (Some(asset_type_id), Some(path)) = (handle_asset_type, path) {
+        cx.dependencies.push((asset_type_id, path));
     }
 
     Ok(converted)
