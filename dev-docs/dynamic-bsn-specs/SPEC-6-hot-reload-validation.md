@@ -19,7 +19,7 @@ SPEC-3 (grammar) and SPEC-4 (resolution) landing first.
 - **G2.** Editing a *base* `.bsn` file updates live instances of every `.bsn` that inherits
   it via `:"base.bsn"`.
 - **G3.** No new asset-level API surface: no new `ScenePatch` fields, no new resources, no
-  new cargo features. Hot reload is a behaviour of the existing
+  new cargo features. Hot reload is a behavior of the existing
   `resolve_scene_patches` / `spawn_queued` pair.
 - **G4.** Zero measurable cost on the immediate (`World::spawn_scene`) path; bounded,
   documented cost on the queued/instance path.
@@ -125,7 +125,7 @@ feature) and a change to `assets/player.bsn`:
 
 So a second apply leaves the previous generation of children alive as parentless
 "ghosts", with all their components, observers and UI nodes, while a fresh generation is
-spawned. That is exactly #24939. It is also already documented behaviour for the
+spawned. That is exactly #24939. It is also already documented behavior for the
 single-apply case: `apply_scene_replaces_and_orphans_children` (`spawn.rs:894-926`)
 asserts the pre-existing child survives but is unlinked.
 
@@ -145,6 +145,7 @@ Setup mirroring `loaded_asset_cached_patching` (`crates/bevy_scene/src/lib.rs:10
 `derived.bsn` = `:"base.bsn"` + `Position { x: 1. }` + `Children [...]`.
 
 At **`derived` resolve time**:
+
 - `CachedSceneAsset::resolve` (`crates/bevy_scene/src/scene.rs:421-441`) looks up base's
   `Handle`, calls `scene.include_cached(handle)` — which stores
   `CachedSceneInfo { handle, duplicate_templates: {} }` (`resolved_scene.rs:549-567`,
@@ -157,6 +158,7 @@ At **`derived` resolve time**:
   the type is recorded in `duplicate_templates`.
 
 At **apply time** (`resolved_scene.rs:234-288`):
+
 - `cached.handle` is looked up **freshly** in `Assets<ScenePatch>` (line 236) and
   `patch.resolved` is `Arc`-cloned **at apply time** (line 248).
 
@@ -164,8 +166,8 @@ At **apply time** (`resolved_scene.rs:234-288`):
 `Handle<ScenePatch>`, not an `Arc<ResolvedSceneRoot>`. Base's resolved root is re-read on
 every single apply. Therefore, when `base.bsn` reloads:
 
-| Base content | Dependent's live behaviour without re-resolve | Correct? |
-|---|---|---|
+| Base content | Dependent's live behavior without re-resolve | Correct? |
+| --- | --- | --- |
 | Templates **not** patched by dependent | read live from base's fresh `resolved` | ✅ |
 | Base's related scenes (children) | read live (`apply_related` on `resolved_cached.scene`, line 284-286) | ✅ |
 | Base's `entity_references` | read live | ✅ |
@@ -217,7 +219,7 @@ the invalidation explicitly.
 4. **`bsn!`-in-code patches are unaffected either way.** `World::queue_spawn_scene`
    (`spawn.rs:195-206`) builds a patch with `AssetServer::add` (`server/mod.rs:1014`,
    path `None`), whose `scene` is `take()`n once and stays `None`. No file, no watcher, no
-   reload, no behaviour change. Confirmed.
+   reload, no behavior change. Confirmed.
 
 The one thing `reload_source` *could* have bought — re-resolving a dependent after its
 base changed — is delivered instead by D-5 (§4.5) via `AssetServer::reload`, which also
@@ -232,6 +234,7 @@ work as a discriminator, because the reloaded value is a brand-new `ScenePatch` 
 
 **Discriminate per *instance*, not per *asset*:** an instance that has already been
 applied is marked by `SceneInstanceState::applied`. On a `LoadedWithDependencies`:
+
 - instances still sitting in `WaitingScenes::scene_entities` → first apply (existing path);
 - instances with `applied == true` → **re-apply** (new path).
 
@@ -273,7 +276,7 @@ in the same archetype move as `ScenePatchInstance` itself, on a still-empty enti
 impl ResolvedSceneRoot {
     /// Applies this scene to `entity` exactly like [`ResolvedSceneRoot::apply`], and
     /// additionally appends every [`Entity`] spawned during the application (related
-    /// entities and entities materialised for forward `#Name` references) to `spawned`.
+    /// entities and entities materialized for forward `#Name` references) to `spawned`.
     /// `entity` itself is never appended. `spawned` is sorted and deduplicated on return.
     pub fn apply_recording(
         &self,
@@ -285,7 +288,7 @@ impl ResolvedSceneRoot {
 ```
 
 `ResolvedSceneRoot::apply` keeps its exact current signature and becomes a thin wrapper
-that passes a non-recording recorder — **no allocation, no behaviour change** for the
+that passes a non-recording recorder — **no allocation, no behavior change** for the
 immediate path.
 
 Internal plumbing, all private to `resolved_scene.rs`:
@@ -320,7 +323,7 @@ both branches**, since a related entity is scene-owned regardless of how it was 
 #### 4.3.3 `bevy_ecs` — reference-map enumeration (`crates/bevy_ecs/src/template.rs`)
 
 A forward `#Name` reference used only in a component value (e.g. `Reference(#Ghost)` with
-no `#Ghost` entity in the scene) materialises an entity via
+no `#Ghost` entity in the scene) materializes an entity via
 `SceneEntityReferences::get` (`template.rs:100-114`) that never becomes a related entity
 and would otherwise be missed. Add, next to `get`/`set`:
 
@@ -380,6 +383,7 @@ fn apply_to_instance(
 ```
 
 All three apply sites route through it:
+
 - the `waiting` branch (`spawn.rs:725-735`),
 - `QueuedScenes::spawn_queued`'s `new_scene_entities` loop (`spawn.rs:805-826`),
 - the new re-apply pass.
@@ -500,6 +504,7 @@ matches `instance.0.id() == id` **or** "the instance's patch depends on `id`":
     state.applied && (instance.0.id() == id || patch_depends_on(patches, instance.0.id(), id))
 })
 ```
+
 where `patch_depends_on` checks `patches.get(dependent).dependencies` for `id`. This
 covers Case A's dependents in the interim frames too (harmless: they get re-applied once
 from the base's live data, then again from their own reload).
@@ -530,7 +535,7 @@ writes per resolve, and partially discharges the TODO at `scene_patch.rs:27`.
 (`spawn.rs:510-518`) push `(entity, handle)` into `QueuedScenes::new_scene_entities` by
 hand, bypassing `ScenePatchInstance`. Replace the manual push with inserting
 `ScenePatchInstance(handle)`; the existing `on_add_scene_patch_instance` observer
-(`spawn.rs:695-705`) performs the identical push. Behaviour-identical, and these entities
+(`spawn.rs:695-705`) performs the identical push. Behavior-identical, and these entities
 become hot-reload-tracked — they are exactly the ones that can include `:"base.bsn"`
 (Case B). Visible change: they now carry `ScenePatchInstance` + `SceneInstanceState`
 (§8, release notes; not a breaking change).
@@ -594,13 +599,13 @@ Each step compiles and passes tests on its own.
    it through `ResolvedScene::apply` / `apply_with` / `apply_related`, add
    `ResolvedSceneRoot::apply_recording`, and re-express `ResolvedSceneRoot::apply` in terms
    of it with `SpawnRecorder::None`. `ResolvedSceneListRoot::spawn_with` passes `None`.
-   No public behaviour change; existing tests must pass unchanged.
+   No public behavior change; existing tests must pass unchanged.
 3. **`crates/bevy_scene/src/scene_patch.rs`** — add `SceneInstanceState`, add
    `#[require(SceneInstanceState)]` to `ScenePatchInstance`. Export from
    `crates/bevy_scene/src/lib.rs` (`pub use scene_patch::*` already covers it); add
    `SceneInstanceState` to the `prelude` (`lib.rs:900-906`).
 4. **`crates/bevy_scene/src/spawn.rs`** — add `apply_to_instance`, route the two existing
-   apply sites through it. Behaviour unchanged; `spawned` is now recorded.
+   apply sites through it. Behavior unchanged; `spawned` is now recorded.
 5. **`crates/bevy_scene/src/spawn.rs`** — D-7: `queue_spawn_scene` / `queue_apply_scene`
    insert `ScenePatchInstance` instead of pushing manually.
 6. **`crates/bevy_scene/src/spawn.rs`** — D-6: `get_mut` → `get_mut_untracked` in
@@ -624,7 +629,7 @@ Each step compiles and passes tests on its own.
    `Failed to resolve scene {id}: {err}` (`spawn.rs:624`) and leaves `resolved: None` on
    the *new* value; the re-apply pass's `.and_then(|p| p.resolved.clone())` yields `None`
    and `continue`s — **live instances keep the last good version**. Desired editor
-   behaviour; asserted by `hot_reload_parse_error_keeps_previous_scene`.
+   behavior; asserted by `hot_reload_parse_error_keeps_previous_scene`.
 2. **Apply fails mid-way after reload.** The previous generation is already despawned, so
    the instance is partially applied. Log at `error!` with asset id, path and entity
    (mirroring `spawn.rs:814-817`) and keep whatever landed in `spawned` so the *next*
@@ -683,11 +688,13 @@ fn bsn_test_app(dir: Dir) -> App {
   `FakeSceneLoader`.
 
 **Simulating a file modification without a watcher** (the mechanism, cited):
+
 ```rust
 dir.insert_asset_text(Path::new("player.bsn"), V2_TEXT);           // "edit the file"
 app.world().resource::<AssetServer>().reload("player.bsn");        // server/mod.rs:958
 run_app_until(&mut app, || /* predicate on world state */);
 ```
+
 `AssetServer::reload` → `reload_internal` → `load_internal(handle, path, force = true, ..)`
 re-runs the loader unconditionally and does **not** require `watching_for_changes`
 (`server/mod.rs:958-984`). For `FakeSceneLoader`-based tests, the "edit" is swapping the
@@ -706,7 +713,7 @@ in `bsn_asset/e2e_tests.rs`, the fixture, and what it asserts. Naming convention
 `dyn_<static_test_name>`.
 
 | # | Static test (`lib.rs:line`) | Dynamic test | Fixture `.bsn` | Asserts |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | 1 | `supports_fully_qualified_component_paths` (:991) | `dyn_fully_qualified_component_paths` | `::bevy_ecs::hierarchy::Children []` | loads & spawns; registry lookup accepts leading `::` and full paths |
 | 2 | `cached_patching` (:1003) | `dyn_cached_patching` | `a.bsn`: `Position { y: 2. }`; `b.bsn`: `:"a.bsn"` `Position { x: 1. }` | root has `Position { x: 1., y: 2., z: 0. }` — field-level merge across the include |
 | 3 | `cached_patching_order` (:1050) | `dyn_cached_patching_order` | as above with both files setting `x` | dependent's value wins; base applied first (`resolved_scene.rs:254-266`) |
@@ -773,7 +780,7 @@ Land with steps 1-8 in `crates/bevy_scene/src/spawn.rs`'s `mod tests`, using
 `FakeSceneLoader`; mirrored with real `.bsn` text in `e2e_tests.rs` after SPEC-5.
 
 | Test | Setup | Assert |
-|---|---|---|
+| --- | --- | --- |
 | `hot_reload_replaces_root_components` | v1 `Position { x: 1. }` → reload v2 `Position { x: 5. }` | root's `Position.x == 5.` |
 | `hot_reload_despawns_previous_children` | v1 `Children [A, B]` → reload v2 `Children [C]` | root has exactly 1 child; the two v1 child entities **no longer exist** (`world.get_entity(..).is_err()`) — the #24939 regression test |
 | `hot_reload_no_orphaned_entities` | as above | total `world.entities().len()` returns to `pre + 1(root) + 1(child)`; no parentless leftovers |
@@ -821,7 +828,7 @@ Extend `examples/scene/bsn.rs` to load its UI from `assets/scenes/ui.bsn` via
 `cargo run --example bsn --features bevy/file_watcher`:
 
 1. UI appears.
-2. Change a `BackgroundColor` in `ui.bsn`. → colour updates without restart; button count
+2. Change a `BackgroundColor` in `ui.bsn`. → color updates without restart; button count
    unchanged; no flicker beyond one frame.
 3. Add a child button. → appears; existing buttons are re-spawned (expected) and remain
    interactive (scene observers re-registered).
@@ -887,7 +894,7 @@ orphaning them.
 
 `Commands::queue_spawn_scene`, `World::queue_spawn_scene` and
 `EntityWorldMut::queue_apply_scene` now insert `ScenePatchInstance` on the target entity
-rather than registering it out-of-band. Spawning and application behaviour is unchanged,
+rather than registering it out-of-band. Spawning and application behavior is unchanged,
 but code that asserted on an exact archetype or component count for these entities must
 account for the two additional components.
 
@@ -912,7 +919,7 @@ incompatibly.
    `#[require]`).
 4. A `.bsn` parse error during reload leaves live instances rendering the previous version
    and logs — never panics.
-5. `ResolvedSceneRoot::apply`'s signature and behaviour are unchanged; the three existing
+5. `ResolvedSceneRoot::apply`'s signature and behavior are unchanged; the three existing
    immediate-path benches show no regression, and the instance-path bench regresses ≤ 3%.
 6. Every non-N/A row of §7.2 has a passing dynamic test; every N/A row cites the SPEC-0 §2
    non-goal that excludes it.
@@ -949,10 +956,10 @@ incompatibly.
    identity `(asset_path, node_id)`, then two `ScenePatchInstance`s of the *same file*
    would share reference identities. That is fine today because
    `ResolvedSceneRoot::apply` builds a **fresh** `SceneEntityReferences` per apply
-   (`resolved_scene.rs:70`) — test #24 in §7.2 pins this. SPEC-2 must not "optimise" that
+   (`resolved_scene.rs:70`) — test #24 in §7.2 pins this. SPEC-2 must not "optimize" that
    map to be shared across applies; flagging so the invariant is recorded in both specs.
 6. **Should `reload_dependents` also fire on `AssetEvent::Removed`?** A deleted base leaves
    dependents with a handle to a missing asset, which surfaces at apply time as
-   `ApplySceneError::MissingCachedScene` (`resolved_scene.rs:236-241`). Current behaviour
+   `ApplySceneError::MissingCachedScene` (`resolved_scene.rs:236-241`). Current behavior
    is "keep the last applied content and log on the next apply", which seems right; not
    specced further.

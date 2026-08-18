@@ -35,7 +35,7 @@ current `main` (post crate-renames, by-value `Scene::resolve`, `BundleWriter` ap
 ## 3. Spec series and dependency order
 
 | Spec | Title | Crate(s) | Depends on |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | SPEC-1 | Reflection type data for Templates & Relationships | `bevy_ecs` | — |
 | SPEC-2 | Erased-API extensions to the scene core | `bevy_scene` (+ `bevy_ecs` for `SceneEntityReference`) | SPEC-1 (types only) |
 | SPEC-3 | `.bsn` text format, lexer, parser, and AST | **new workspace crate `crates/bevy_bsn`** (zero bevy deps) | — |
@@ -219,6 +219,7 @@ pub struct DynamicScene { /* Arc<DynamicSceneInner> */ }
 ```
 
 Resolution rules (normative):
+
 - Symbol → `TypeRegistration` via `TypeRegistry::get_with_type_path`, falling back to
   parent-path lookup for enum variants (port `resolve_type_or_enum_variant_to_template`
   from `dynamic_bsn.rs:857-903`).
@@ -291,6 +292,7 @@ non-goal). `bsn!`-defined patches without a retained source keep current behavio
 After review of SPEC-1..6 against the codebase, the following are RATIFIED:
 
 **Contract A (SPEC-1):**
+
 - A-1: `ReflectTemplate` gains `output_type_id: TypeId` (enables locating `ReflectComponent`
   on the output type at load time and handle-dependency discovery, SPEC-4 §4.10).
 - `ReflectFromTemplate` gains `template_type_path: &'static str` (error messages).
@@ -305,6 +307,7 @@ After review of SPEC-1..6 against the codebase, the following are RATIFIED:
   the attribute are not `.bsn`-usable and fail at load with `TypeNotRegistered`.
 
 **Contract C (SPEC-2):**
+
 - C-6: `ErasedComponentTemplate` gains
   `fn template_type_id(&self) -> TypeId { Any::type_id(self) }`; the duplicate-skip at
   `resolved_scene.rs:325` switches to it. (Fixes double-insertion of dynamic templates

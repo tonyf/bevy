@@ -22,7 +22,7 @@ make statically- and dynamically-defined patches on the same component merge cor
 directions**.
 
 | # | Change | Crate | Depends on |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | C1 | `ResolvedScene::get_or_insert_erased_template` takes `impl FnOnce` instead of `fn()` | `bevy_scene` | — |
 | C2 | `ErasedComponentTemplate::try_as_partial_reflect{,_mut}` (default `None`) + registry-assisted helpers | `bevy_scene` | — |
 | C3 | `RelatedResolvedScenes::new_erased` + `ResolvedScene::get_or_insert_related_resolved_scenes_erased` | `bevy_scene` | SPEC-1 (second half only) |
@@ -375,7 +375,7 @@ impl RelatedResolvedScenes {
 ```
 
 `RelatedResolvedScenes::new::<R>` is rewritten to call `new_erased` with the two existing closure
-literals (behaviour identical; one definition of the struct layout).
+literals (behavior identical; one definition of the struct layout).
 
 #### C3.b `get_or_insert_related_resolved_scenes_erased` (needs SPEC-1)
 
@@ -583,7 +583,7 @@ every apply**: `ResolvedSceneRoot::apply` (`resolved_scene.rs:70`) and
 per call. A `SceneEntityReference` derived from `(asset_path, node_id)` is *identical* across
 every spawn of that scene — unlike a macro reference, whose `runtime` counter differs per `bsn!`
 invocation. If the map were ever hoisted, cached, or shared across applies (e.g. as an
-optimisation in SPEC-6's hot-reload re-apply), the second spawn of a `.bsn` scene would resolve
+optimization in SPEC-6's hot-reload re-apply), the second spawn of a `.bsn` scene would resolve
 its `#Name` references to the **first** spawn's entities. Add to `SceneEntityReference`'s doc
 comment:
 
@@ -619,7 +619,7 @@ If exactness is ever required, the drop-in replacement is a process-local path i
 #### Backward-compatibility verification against the `bsn!` macro
 
 | Emitted code (codegen.rs) | Status |
-|---|---|
+| --- | --- |
 | `SceneEntityReference::new(#invocation, #index, _call_id,)` `:293` | signature unchanged ✔ |
 | `EntityTemplate::from_reference(#invocation, #index, _call_id)` `:580` | signature unchanged ✔ |
 | `EntityTemplate::SceneEntityReference(SceneEntityReference::new(#invocation, #index, _call_id))` `:717-718` | signature unchanged ✔ |
@@ -791,7 +791,7 @@ And change one line:
 ```
 
 `template` is `&Box<dyn ErasedComponentTemplate>`; `template.template_type_id()` auto-derefs
-through the `Box` to the trait object and dispatches dynamically. Behaviour for all existing
+through the `Box` to the trait object and dispatches dynamically. Behavior for all existing
 templates is byte-for-byte identical (`Any::type_id` on the concrete type is exactly what
 `(**template).type_id()` returned).
 
@@ -852,7 +852,7 @@ those impls pass `context` through and never rebuild it.
 Four public methods gain a fourth parameter, `type_registry: Option<&TypeRegistry>`, placed last:
 
 | File:line | Signature after |
-|---|---|
+| --- | --- |
 | `resolved_scene.rs:26` | `ResolvedSceneRoot::resolve(scene: Box<dyn Scene>, assets: &AssetServer, patches: &Assets<ScenePatch>, type_registry: Option<&TypeRegistry>)` |
 | `resolved_scene.rs:93` | `ResolvedSceneListRoot::resolve(scene_list: Box<dyn SceneList>, assets, patches, type_registry)` |
 | `scene_patch.rs:57` | `ScenePatch::resolve(&mut self, assets, patches, type_registry)` |
@@ -1141,7 +1141,7 @@ extra annotation. SPEC-1 Phase 5's `#[template(reflect)]` gives generated templa
    `ReflectRelationshipTarget`, built monomorphically from one `R`. Documented.
 7. **Same relationship inserted via both APIs (C3).** `or_insert_with` keeps the existing entry,
    so the second call reuses the first's function pointers and appends into the same `scenes`
-   vector — the required merge behaviour.
+   vector — the required merge behavior.
 8. **Asset path with a label (C4).** `AssetPath::to_string()` includes `#label`, so
    `menu.bsn#root` and `menu.bsn#footer` hash differently. SPEC-5 must pass the full path.
 9. **`node_id` vs `name_id` numeric overlap (C4).** A macro `name_id` of `3` and an asset
@@ -1192,7 +1192,7 @@ impl untouched. Every `unsafe` block needs a `SAFETY:` comment
 
 **Step 4 — C6.** In `resolved_scene.rs`: add the `template_type_id` provided method; change
 `resolved_scene.rs:325` to `template.template_type_id()`; extend the two
-`insert_erased_template` / `get_or_insert_erased_template` doc comments. Behaviour-neutral for
+`insert_erased_template` / `get_or_insert_erased_template` doc comments. Behavior-neutral for
 all existing templates.
 
 **Step 5 — C7.** Ordered sub-steps, each compiling:
@@ -1205,7 +1205,7 @@ all existing templates.
      guard-scoping block; add `type_registry: Option<Res<AppTypeRegistry>>` to
      `resolve_scene_patches` and thread it to sites 6–7.
   e. `resolved_scene.rs`: split `get_or_insert_erased_template` into
-     `get_or_insert_erased_template_index` + wrapper (behaviour-neutral).
+     `get_or_insert_erased_template_index` + wrapper (behavior-neutral).
   f. `resolved_scene.rs`: add `recover_typed_template` (+ the `ReflectFromReflect` and
      `tracing::error` imports) and rewrite `get_or_insert_template`.
   Verify after (d) that the whole workspace still builds (`cargo check --workspace`), since
@@ -1356,6 +1356,7 @@ Tests:
    Copy the memory-asset-source + `FakeSceneLoader` scaffold from `loaded_asset_cached_patching`
    (`lib.rs:1113-1152`), with the loader returning
    `ScenePatch::load_with(load_context, base())` where
+
    ```rust
    fn base() -> impl Scene {
        SceneFunction(|_ctx: &mut ResolveContext, scene: &mut ResolvedScene| {
@@ -1366,6 +1367,7 @@ Tests:
        })
    }
    ```
+
    Then `FAKE_APPLY_COUNT.store(0, Ordering::Relaxed);` and spawn a scene equivalent to
    `bsn! { :"a.bsn" }` followed by a `SceneFunction` that calls
    `scene.get_or_insert_erased_template(ctx, TypeId::of::<Marker>(), || Box::new(Marker(9)))`
@@ -1374,6 +1376,7 @@ Tests:
    entity's `Marker == Marker(9)`. Before C6 the counter is `1` and the same `ComponentId` is
    pushed twice into one `BundleWriter` write.
 8. `typed_patch_recovers_values_from_dynamic_base` — **C7**, the headline case. No loader needed:
+
    ```rust
    let mut app = test_app();
    app.world_mut().resource_mut::<AppTypeRegistry>().write().register::<Position>();
@@ -1397,6 +1400,7 @@ Tests:
    position.x = 1.;
    assert_eq!(*position, Position { x: 1., y: 2., z: 0. });
    ```
+
    `y` surviving is the whole point: the dynamic base's value was recovered, not discarded.
    Before C7 this test **panics** at `downcast_mut().unwrap()`.
 9. `typed_patch_over_dynamic_base_falls_back_to_default_when_unregistered` — **C7 fallback**.
@@ -1423,22 +1427,22 @@ Tests:
 
 ### `crates/bevy_ecs/src/template.rs`, inside the existing `mod tests` (`:588`)
 
-15. `asset_scene_entity_reference_is_stable` — **C4**. `from_asset("a.bsn", 3)` equals itself
+ 1. `asset_scene_entity_reference_is_stable` — **C4**. `from_asset("a.bsn", 3)` equals itself
     across two constructions, and their `.hash()` values (via `Deref` to `Hashed`) are equal.
-16. `asset_scene_entity_references_differ_by_path_and_node` — **C4**.
+ 2. `asset_scene_entity_references_differ_by_path_and_node` — **C4**.
     `from_asset("a.bsn", 3) != from_asset("b.bsn", 3)`; `from_asset("a.bsn", 3) != from_asset("a.bsn", 4)`.
-17. `asset_and_call_site_references_never_collide` — **C4**.
+ 3. `asset_and_call_site_references_never_collide` — **C4**.
     `from_asset("x", 0) != SceneEntityReference::new(("x", 0, 0), 0, 0)`.
-18. `scene_entity_references_map_resolves_asset_references` — **C4**. With a fresh
+ 4. `scene_entity_references_map_resolves_asset_references` — **C4**. With a fresh
     `SceneEntityReferences` and `World`: `get(from_asset("a.bsn", 1))` twice yields the same
     `Entity`; `get(from_asset("a.bsn", 2))` yields a different one; both are alive.
-19. `fresh_reference_map_yields_fresh_entities` — **C4 invariant**. Two *separate*
+ 5. `fresh_reference_map_yields_fresh_entities` — **C4 invariant**. Two *separate*
     `SceneEntityReferences::default()` maps queried with the *same* `from_asset("a.bsn", 1)` must
     yield **different** entities. This is the invariant SPEC-6 must not break.
-20. `entity_template_from_asset_reference` — **C4**. `EntityTemplate::from_asset_reference("a.bsn", 1)`
+ 6. `entity_template_from_asset_reference` — **C4**. `EntityTemplate::from_asset_reference("a.bsn", 1)`
     matches `EntityTemplate::SceneEntityReference(SceneEntityReference::from_asset("a.bsn", 1))`,
     and `clone_template()` round-trips it.
-21. `call_site_scene_entity_reference_unchanged` — **C4** regression.
+ 7. `call_site_scene_entity_reference_unchanged` — **C4** regression.
     `new(("f.rs", 1, 2), 3, 4) == new(("f.rs", 1, 2), 3, 4)` and `!= new(("f.rs", 1, 2), 3, 5)`;
     `format!("{r}").starts_with("global=f.rs:1:2")`.
 
@@ -1446,7 +1450,7 @@ Tests:
 
 The existing `bsn!` `#Name` tests (`lib.rs:1002`, `:2364`, `:2422`) gate C4's macro
 compatibility; `cached_patching` (`:1002`), `cached_patching_order` (`:1049`) and
-`loaded_asset_cached_patching` (`:1083`) gate C6/C7's copy-on-write behaviour for purely typed
+`loaded_asset_cached_patching` (`:1083`) gate C6/C7's copy-on-write behavior for purely typed
 templates. All must pass unmodified.
 
 Commands: `cargo test -p bevy_ecs --lib template`, `cargo test -p bevy_scene`,

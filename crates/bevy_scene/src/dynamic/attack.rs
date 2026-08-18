@@ -586,7 +586,7 @@ fn b6_deep_nesting_errors_not_overflows() {
 
 /// B7: a base include of a file that fails to parse.
 #[test]
-fn b7_base_of_unparseable_file() {
+fn b7_base_of_unparsable_file() {
     let mut app = multi_asset_app_lenient(&[("broken.bsn", "Position { x: ")]);
     let b = scene(&app, "b.bsn", ":\"broken.bsn\"\nMarker");
     let world = app.world_mut();

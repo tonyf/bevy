@@ -46,6 +46,7 @@ All `file:line` references below were read against the working tree at commit `2
 ## 3. Background (existing code this spec builds on)
 
 - **The `AssetLoader` trait** (`crates/bevy_asset/src/loader.rs:32-52`):
+
   ```rust
   pub trait AssetLoader: TypePath + Send + Sync + 'static {
       type Asset: Asset;
@@ -57,6 +58,7 @@ All `file:line` references below were read against the working tree at commit `2
       fn extensions(&self) -> &[&str] { &[] }
   }
   ```
+
   Note `Self::Error: Into<BevyError>` — any `thiserror` enum that is `Error + Send + Sync +
   'static` qualifies.
 - **Canonical loader pattern** (`bevy_world_serialization/src/world_asset_loader.rs:18-34`):
@@ -103,7 +105,7 @@ All `file:line` references below were read against the working tree at commit `2
 ### 4.1 Files created / modified
 
 | File | Action |
-|---|---|
+| --- | --- |
 | `crates/bevy_bsn/**` | **new crate, owned by SPEC-3** — consumed here as an optional dependency (§4.8); no SPEC-5 edits |
 | `crates/bevy_scene/src/dynamic/loader.rs` | **new** — `DynamicBsnLoader`, `DynamicBsnLoaderError`, `decode_bsn_source`, `check_single_root`, `check_no_self_include`, `report_scene_patch_load_failures`, unit tests |
 | `crates/bevy_scene/src/dynamic/mod.rs` | modified (owned by SPEC-4) — add `mod loader; pub use loader::*;` |
@@ -168,7 +170,7 @@ impl FromWorld for DynamicBsnLoader {
   load (legal — the field is `pub` — but pointless indirection). This is the one place SPEC-5
   deviates from the `world_asset_loader.rs` precedent, and it is driven by the callee's
   signature, not by preference.
-- Behaviour is otherwise identical: `AppTypeRegistry(pub TypeRegistryArc)` is
+- Behavior is otherwise identical: `AppTypeRegistry(pub TypeRegistryArc)` is
   `#[derive(Resource, Clone, Default)]` (`bevy_ecs/src/reflect/mod.rs:35-36`), so the clone
   aliases the same `Arc<RwLock<TypeRegistry>>`. **Types registered after `ScenePlugin::build`
   runs are therefore visible to the loader** — essential, because user `App::register_type`
@@ -317,6 +319,7 @@ fn decode_bsn_source<'a>(bytes: &'a [u8], path: &str)
 ```
 
 Policy (normative):
+
 - `.bsn` files are UTF-8. A **UTF-8 BOM is silently stripped** (Windows editors emit it), and
   all spans/line-columns are computed against the *stripped* source. Consequence: a diagnostic
   on line 1 of a BOM'd file reports the column as if the BOM were absent, which matches what
@@ -606,7 +609,7 @@ dependency rather than a `#[cfg]` gate.
 
 **`docs/cargo_features.md`** is generated — after editing the root manifest run:
 
-```
+```text
 cargo run -p build-templated-pages -- update features
 ```
 
@@ -615,7 +618,7 @@ which appends the `bsn_asset` row (from the `# Provides ...` doc comment) and up
 
 ---
 
-## 5. Interoperability: exact user-facing behaviour
+## 5. Interoperability: exact user-facing behavior
 
 ### 5.1 Spawning a `.bsn` asset directly
 
@@ -694,7 +697,7 @@ relative to the asset root, not to the including file.**
 **Merge semantics.** With the base resolved, `ResolvedScene::get_or_insert_erased_template`
 clones the base's template (copy-on-write, `resolved_scene.rs:467-491`) before applying the
 derived patch, so unspecified fields keep the base's values and specified fields win. This is
-exactly the behaviour the empirical probe confirmed (`x` from the derived scene, `y` from the
+exactly the behavior the empirical probe confirmed (`x` from the derived scene, `y` from the
 base). It is also why resolve *ordering* (§5.3) matters. This is *the* case that needs SPEC-2's
 ratified C-7: the cached slot holds a **dynamic** template built by the loader, and the
 derived `bsn!` patch asks for it as a **typed** `T`; both `World::spawn_scene` and
@@ -761,7 +764,7 @@ a label convention now would very likely be wrong. Recorded as open question Q2.
 
 ### 6.1 `assets/scenes/dynamic_bsn_button.bsn` (the base, included by the macro)
 
-```
+```text
 // A reusable button. Included from Rust with `bsn! { :"scenes/dynamic_bsn_button.bsn" }`
 // and from other `.bsn` files with `:"scenes/dynamic_bsn_button.bsn"`.
 bevy_ui::Node {
@@ -780,7 +783,7 @@ Children [
 
 ### 6.2 `assets/scenes/dynamic_bsn_example.bsn` (the root scene, loaded as an asset)
 
-```
+```text
 // Loaded with `asset_server.load::<ScenePatch>("scenes/dynamic_bsn_example.bsn")`.
 #Root
 bevy_ui::Node {
@@ -810,7 +813,7 @@ Children [
 **No associated consts.** Per SPEC-0 §7, associated constants (`Color::WHITE`,
 `BorderRadius::MAX`, `Val::ZERO`, …) are **not supported in `.bsn` in v1**: SPEC-4 resolves a
 bare path to a unit struct or a unit enum variant only, and Rust consts are not reachable
-through the type registry. Every colour in the example is therefore written as an explicit
+through the type registry. Every color in the example is therefore written as an explicit
 `Color::Srgba(Srgba { … })` struct literal with numeric fields — which is also a better
 demonstration of nested value construction. Reviewers of these `.bsn` files must reject any
 re-introduction of a const path.
@@ -818,14 +821,14 @@ re-introduction of a const path.
 Coverage checklist (each item is an acceptance requirement on SPEC-3/SPEC-4):
 
 | Feature | Where |
-|---|---|
+| --- | --- |
 | Fully-qualified component paths | every component above |
 | Partial struct fields | `Node { width, height, ... }` (12+ fields left at default) |
 | Enum unit variants | `AlignItems::Center`, `JustifyContent::Center`, `FlexDirection::Column` |
 | Enum tuple variant with a struct payload | `Color::Srgba(Srgba { red: …, green: …, blue: …, alpha: … })` |
 | Tuple struct patch | `BackgroundColor(...)`, `Text("...")`, `TextColor(...)` |
 | Nested struct value inside a tuple patch | the `Srgba { … }` payloads |
-| `Children` nesting with parenthesised entities | both files |
+| `Children` nesting with parenthesized entities | both files |
 | `#Name` | `#Root`, `#Logo`, `#Title`, `#Label` |
 | Asset-path `Handle` field (string → `HandleTemplate::Path`) | `ImageNode { image: "branding/bevy_logo_dark.png" }` |
 
@@ -1025,8 +1028,8 @@ These need no `App`: they exercise decoding and error rendering directly.
 3. `decode_rejects_invalid_utf8` — `b"ok\xC3"` returns `InvalidUtf8 { valid_up_to: 2, .. }`.
 4. `parse_error_message_is_file_line_column` — construct
    `DynamicBsnLoaderError::Parse { path: "scenes/x.bsn".into(), line: 12, column: 5,
-   message: "expected `}`".into() }` and assert
-   `to_string() == "scenes/x.bsn:12:5: expected `}`"`.
+   message: "expected`}`".into() }` and assert
+   `to_string() == "scenes/x.bsn:12:5: expected`}`"`.
 5. `multiple_roots_error_mentions_count` — the `MultipleRoots` display contains "exactly one
    root entity" and the count.
 6. `self_include_error_mentions_the_path` — the `SelfInclude` display contains "inherits from
@@ -1094,7 +1097,7 @@ Note: the asset source must be registered **before** `AssetPlugin`
     branch at `spawn.rs:807-818`).
 11. `self_include_rejected` — `a.bsn` whose first entry is `:"a.bsn"`; assert
     `load_state(&handle)` is `Failed` and the rendered error contains "inherits from itself".
-    Also assert the app does not hang (bounded `run_app_until`), which is the behaviour the
+    Also assert the app does not hang (bounded `run_app_until`), which is the behavior the
     check exists to guarantee.
 12. `failed_load_is_reported_once` — the load-failure system of §4.7.1. Load a malformed
     `bad.bsn`, then pump the app for 10 frames with a test-local
@@ -1148,7 +1151,7 @@ The loader returns `Err`. The asset server wraps it as
 (`server/mod.rs:2436`), logs it at `error!`, and emits `AssetLoadFailedEvent<ScenePatch>` plus
 `UntypedAssetLoadFailedEvent` (`server/mod.rs:203-212`). The user sees, verbatim:
 
-```
+```text
 ERROR bevy_asset::server: Failed to load asset 'scenes/player.bsn' with asset loader
 'bevy_scene::dynamic::loader::DynamicBsnLoader': scenes/player.bsn:7:14: expected `}`, found `,`
 ```
@@ -1162,7 +1165,7 @@ entities with a `ScenePatchInstance` pointing at it stay in `WaitingScenes` fore
 never gain components. `report_scene_patch_load_failures` (§4.7.1, ratified) adds a second,
 scene-specific line naming the consequence:
 
-```
+```text
 ERROR bevy_scene: Failed to load scene asset "scenes/player.bsn": Failed to load asset
 'scenes/player.bsn' with asset loader 'bevy_scene::dynamic::loader::DynamicBsnLoader':
 scenes/player.bsn:7:14: expected `}`, found `,`. Entities whose `ScenePatchInstance` points at
@@ -1180,7 +1183,7 @@ Produced by SPEC-4's builder (`ResolveSceneError::TypeNotRegistered` and friends
 and surfaced as `DynamicBsnLoaderError::Build` with `file:line:column`. Required message
 content (SPEC-4 owns the wording; SPEC-5 requires these elements):
 
-```
+```text
 scenes/player.bsn:3:1: `my_game::Health` is not registered in the type registry. Add
 `#[derive(Reflect)]` and `#[reflect(Component)]` to the type, and register it with
 `app.register_type::<my_game::Health>()`.
@@ -1189,7 +1192,7 @@ scenes/player.bsn:3:1: `my_game::Health` is not registered in the type registry.
 ### 10.3 Feature disabled
 
 With `bsn_asset` off, no loader claims the `bsn` extension, so `AssetServer::load` fails with
-`MissingAssetLoaderForExtensionError` — `no `AssetLoader` found for the following extension(s): bsn`
+`MissingAssetLoaderForExtensionError` — `no`AssetLoader`found for the following extension(s): bsn`
 (`server/mod.rs:2465-2468`). The `bsn!` macro's `:"file.bsn"` include still compiles and still
 registers the dependency, so the same message appears at load time rather than at spawn time.
 Mention the feature name in the `.bsn` docs section (§7.1) so the search for that message lands
@@ -1199,13 +1202,13 @@ and would confuse `AssetProcessor`; the standard message plus documentation is e
 
 ### 10.4 Other edge cases
 
-| Case | Behaviour |
-|---|---|
+| Case | Behavior |
+| --- | --- |
 | Zero-byte file | Whatever SPEC-3's grammar says for an empty document; if empty documents are legal, the result is a `ScenePatch` with no templates that applies nothing. |
 | File with only comments/whitespace | Same as above. |
 | Extension casing (`.BSN`) | `AssetServer` extension matching is case-sensitive; `.BSN` gets no loader. Not handled. |
 | `.bsn` loaded as the wrong asset type (`load::<Image>`) | Standard asset-server type-mismatch error; no special handling. |
-| A `.bsn` file whose `Handle` field points at a missing asset | The `.bsn` itself loads; the dependency fails, so recursive dependency state never becomes `Loaded`, so `LoadedWithDependencies` never fires and the scene never resolves. The missing dependency is logged by the asset server. Same behaviour as `bsn!` today. |
+| A `.bsn` file whose `Handle` field points at a missing asset | The `.bsn` itself loads; the dependency fails, so recursive dependency state never becomes `Loaded`, so `LoadedWithDependencies` never fires and the scene never resolves. The missing dependency is logged by the asset server. Same behavior as `bsn!` today. |
 | Very large file | No limits imposed; parsing happens once on the async task pool. |
 | Concurrent loads of the same path | Handled by `AssetServer` (single load per path). |
 | Registry lock poisoning | Owned by SPEC-4 now (`from_document` does the `read()`); bevy's `TypeRegistryArc::read` uses `PoisonError::into_inner`, so no handling is needed. |

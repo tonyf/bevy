@@ -908,7 +908,7 @@ fn non_default_print_options_still_re_parse() {
             crate::write_document_with(&document, &mut text, option).unwrap();
             let reparsed = match parse(&text) {
                 Ok(reparsed) => reparsed,
-                Err(error) => panic!("{option:?} produced unparseable text {text:?}: {error}"),
+                Err(error) => panic!("{option:?} produced unparsable text {text:?}: {error}"),
             };
             assert!(
                 document.structural_eq(&reparsed),

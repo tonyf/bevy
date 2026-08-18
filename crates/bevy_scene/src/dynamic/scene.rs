@@ -161,7 +161,7 @@ fn resolve_entity(
     scene: &mut ResolvedScene,
 ) -> Result<(), ResolveSceneError> {
     // (1) The base include has to come first: `include_cached` rejects a late include, and the
-    //     copy-on-write behaviour of every template access below depends on `context.cached`.
+    //     copy-on-write behavior of every template access below depends on `context.cached`.
     if let Some(base) = &entity.base {
         CachedSceneAsset(base.clone()).resolve(context, scene)?;
     }

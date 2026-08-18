@@ -1324,7 +1324,7 @@ fn bsn_file_inherits_bsn_file() {
     );
     // Only two levels of children appear. Applying a cached scene applies *that* scene's related
     // entities, but not those of the scene *it* caches in turn, so `c.bsn`'s child is dropped.
-    // This is pre-existing behaviour of the cached apply path (`ResolvedScene::apply_with`), not
+    // This is pre-existing behavior of the cached apply path (`ResolvedScene::apply_with`), not
     // something hot reload introduces; it is pinned here so the boundary is visible. The template
     // merge above is transitive because copy-on-write flattens templates at resolve time.
     assert_eq!(child_names(&app, root), ["B", "A"]);

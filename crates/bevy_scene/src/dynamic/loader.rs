@@ -162,7 +162,7 @@ fn check_no_self_include(
             continue;
         };
         // `bevy_bsn` knows nothing about `bevy_asset`, so a base is a plain `String` there; the
-        // loader is the layer that gives it asset-path meaning. An unparseable path is left to the
+        // loader is the layer that gives it asset-path meaning. An unparsable path is left to the
         // builder, which reports it as `InvalidAssetPath` with a span.
         let Ok(base_path) = AssetPath::try_parse(base.as_str()) else {
             continue;

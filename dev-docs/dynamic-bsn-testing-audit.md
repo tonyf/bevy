@@ -9,7 +9,7 @@ measurements and the adjudications.
 Before → after the Layer-5a gap tests (region coverage):
 
 | File | Before | After |
-|---|---|---|
+| --- | --- | --- |
 | bevy_bsn (6 files aggregate) | 97.0% | 98.1% |
 | dynamic/value.rs | 92.4% | 97.4% |
 | dynamic/build.rs | 92.1% | 97.3% |
@@ -30,11 +30,12 @@ Method: release `breakout` builds in isolated worktrees at the exact A/B pair �
 `5076c0fe8` (parser layer tip) vs `e3b83dd8a` (the SPEC-1 bevy_ecs commit).
 
 | Measure | Base | With SPEC-1 | Delta |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Unstripped | 157,777,224 | 160,615,744 | +2,838,520 (+1.80%) |
 | Stripped | 102,899,584 | 104,730,288 | +1,830,704 (+1.78%) |
 
 Symbol attribution (nm, stripped-equivalent sections):
+
 - `push_to_bundle_writer` monomorphizations: **310 symbols, 181 KB — 0.11%** of the
   binary. This is the per-`#[reflect(Component)]` fn the ≤1.5% criterion targeted:
   **passes with ~13× margin.**

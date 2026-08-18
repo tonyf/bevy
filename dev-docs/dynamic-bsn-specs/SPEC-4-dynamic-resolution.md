@@ -132,7 +132,7 @@ Target: `/home/tony/workspace/bevy`, `main`, `0.20.0-dev`.
 Every item below is a place where the port **must** differ from the scratchpad file.
 
 | # | pcwalton (`dynamic_bsn.rs`) | current `main` / this spec |
-|---|---|---|
+| --- | --- | --- |
 | D1 | `Scene::resolve(&self, …)` (`:795, :821, :921`) | by-value `resolve(self, …)`; `DynamicScene` holds an `Arc` so `self` consumption is free (§4.3) |
 | D2 | `ErasedTemplate` + `context.entity.insert_reflect(...)` (`:985`) — one archetype move **per component** | `ErasedComponentTemplate::apply(&self, ctx, &mut BundleWriter)` + Contract A `push_to_bundle_writer` — a **single** archetype move for the whole entity (§4.7) |
 | D3 | `ErasedTemplate::as_any_mut` + `try_as_partial_reflect_mut` already on the trait (`:995-1001`) | `main` has neither; Contract C item 2 adds `try_as_partial_reflect{,_mut}` with `None` defaults; §4.9 adds the `ReflectFromPtr` fallback for typed slots |
@@ -155,7 +155,7 @@ Every item below is a place where the port **must** differ from the scratchpad f
 ### 4.1 Files
 
 | Path | Action |
-|---|---|
+| --- | --- |
 | `crates/bevy_scene/src/dynamic/mod.rs` | **new** — `pub use` of the items below; module doc |
 | `crates/bevy_scene/src/dynamic/scene.rs` | **new** — `DynamicScene`, `DynamicSceneInner`, `DynamicSceneEntity`, `DynamicRelation`, `Scene` impl |
 | `crates/bevy_scene/src/dynamic/build.rs` | **new** — `DynamicSceneBuilder`, symbol resolution, `DynamicSceneBuildError` |
@@ -193,6 +193,7 @@ are re-raised in §10.
   `EntityTemplate`.
 - **A-1 *(addendum to Contract A)* — RATIFIED (SPEC-0 §7). `ReflectTemplate` gains
   `output_type_id: TypeId`.**
+
   ```rust
   pub struct ReflectTemplate {
       pub build_template: fn(&dyn Reflect, &mut TemplateContext) -> Result<Box<dyn Reflect>, BevyError>,
@@ -200,6 +201,7 @@ are re-raised in §10.
       pub output_type_id: TypeId,
   }
   ```
+
   Needed for (a) locating `ReflectComponent` on the *output* type at load time and
   (b) discovering that `HandleTemplate<A>` produces `Handle<A>` and thence `A`'s `TypeId`
   for dependency registration (§4.10). Cost: one field.
@@ -208,11 +210,13 @@ are re-raised in §10.
   `#[reflect(FromTemplate)]`; §4.4.2 uses the former in its error paths.
 - **C-6 *(addendum to Contract C)* — RATIFIED (SPEC-0 §7).
   `ErasedComponentTemplate::template_type_id`.**
+
   ```rust
   /// The `TypeId` of the `Template` this erased template represents. This is the key used by
   /// `ResolvedScene::template_indices`; it is *not* necessarily the `TypeId` of `Self`.
   fn template_type_id(&self) -> TypeId { Any::type_id(self) }
   ```
+
   and `resolved_scene.rs:325` changes from `(**template).type_id()` to
   `template.template_type_id()`. **Required for correctness**: without it the
   `duplicate_templates` copy-on-write skip (`resolved_scene.rs:254-261`) never matches a
@@ -350,7 +354,7 @@ and no allocation.
 all `Clone` and are (or contain only) function pointers
 (`std_traits.rs:11-14`, `reflect/component.rs:80-81`). Cloning them at build time means:
 (a) `resolve` and `apply` perform **zero** `TypeRegistry` lookups, so no
-`TypeNotRegistered` can appear after a successful load; (b) behaviour is pinned to the
+`TypeNotRegistered` can appear after a successful load; (b) behavior is pinned to the
 registry state at load, which is deterministic; (c) `apply` does not need to hold a read
 guard across `build_template`, avoiding the re-entrant `RwLock` read hazard.
 A live `AppTypeRegistry` handle is still stored on `DynamicComponentTemplate` because
@@ -411,6 +415,7 @@ fn resolve_symbol<'a>(
 ```
 
 Algorithm (`BsnPath::as_path()` joins segments with `::`):
+
 1. `registry.get_with_type_path(&path.as_path())` → `Some(r)` ⇒ `ResolvedSymbol { r, None }`.
 2. Otherwise, if the path has ≥ 2 segments, look up the parent path
    (`path.as_path_skip_last()`), i.e. `a::b::MyEnum` for `a::b::MyEnum::Variant`.
@@ -437,6 +442,7 @@ fn template_registration<'a>(
     prefix: BsnPatchPrefix,
 ) -> Result<(&'a TypeRegistration /*template*/, &'a TypeRegistration /*output*/), _>
 ```
+
 - `BsnPatchPrefix::Template` (`~Type`) ⇒ the named type *is* the template. Its output is
   `named.data::<ReflectTemplate>().map(|t| t.output_type_id)` (addendum A-1), defaulting to
   `named.type_id()`.
@@ -474,7 +480,7 @@ fn build_value(
 `build_value` is the only entry point; it dispatches on `BsnValue` (Contract D) and is
 recursive. Every arm ends with the shared **coercion tail**:
 
-```
+```text
 COERCE(produced: Box<dyn Reflect>, produced_type_id, expected) →
   1. if produced_type_id == expected.type_id()               → Ok(produced)
   2. if let Some(c) = expected.data::<ReflectConvert>()
@@ -500,7 +506,7 @@ Integer literal, in order:
 3. **Range-checked numeric coercion**, by `expected.type_id()`:
 
    | expected | rule |
-   |---|---|
+   | --- | --- |
    | `i8 i16 i32 i64 i128 isize` | `TryFrom<i128>`; on failure `IntegerOutOfRange` |
    | `u8 u16 u32 u64 u128 usize` | `TryFrom<i128>`; negative or too large ⇒ `IntegerOutOfRange` |
    | `f32` | allowed iff `v.unsigned_abs() <= 1 << 24` (exactly representable), else `LiteralNotRepresentable` |
@@ -541,6 +547,7 @@ Bool literal: exact `bool` → `ReflectConvert` from `bool` → optionish → er
 #### 4.6.3 `BsnValue::Path(BsnPath)` — unit struct or unit enum variant
 
 Resolve the symbol (§4.4.1).
+
 - **Unit enum variant:** produce a value of the *named enum* type:
   `let mut v = reg.data::<ReflectDefault>()?.default();`
   `v.try_apply(&DynamicEnum::new(variant, DynamicVariant::Unit))?`.
@@ -566,6 +573,7 @@ cannot express this; our algorithm can, because the partial value is only ever f
 `try_apply`, which visits *incoming* fields only (`structs.rs:499-509`).
 
 **Case B — enum variant.** Build a `DynamicEnum` with the correct variant name:
+
 - Look up `VariantInfo` for `sym.variant` on the enum's `TypeInfo`.
 - **Fill every non-ignored field of that variant** with `ReflectDefault::default()` of the
   field's own type (`NamedField::ty().id()` / `UnnamedField::ty().id()` → registration →
@@ -590,7 +598,8 @@ mirrors `(#ty).into()` (`codegen.rs:744`).
 #### 4.6.5 Building a partial struct / tuple-struct value
 
 Named fields (`BsnValue::Struct`):
-```
+
+```text
 let info = expected_or_named.type_info().as_struct()?;   // else TypeNotStruct
 let mut ds = DynamicStruct::default();
 ds.set_represented_type(Some(type_info));                 // preserves TypePath in errors
@@ -601,12 +610,14 @@ for (name, v) in fields {
     ds.insert_boxed(name.clone(), build_value(cx, v, field_reg)?);
 }
 ```
+
 **Unknown fields are a hard error**, matching the reflect *deserializer*'s strictness and
 the macro's compile error, and deliberately *not* `try_apply`'s silent skip
 (`structs.rs:503-506`). Duplicate fields are a hard error, matching `codegen.rs:484-490`.
 
 Tuple fields (`BsnValue::NamedTuple`), the **partial leading fields** rule:
-```
+
+```text
 let info = <TupleStructInfo | TupleVariantInfo>;
 if fields.len() > info.field_len() { return Err(TooManyTupleFields { .. }); }
 let mut dts = DynamicTupleStruct::default();
@@ -615,6 +626,7 @@ for (i, v) in fields.iter().enumerate() {
     dts.insert_boxed(build_value(cx, v, field_reg)?);
 }
 ```
+
 Fields `fields.len()..info.field_len()` are simply absent; `try_apply` on a tuple struct
 iterates the incoming value's indices only (`tuple_struct.rs:108-120`), so trailing fields
 keep their prior value — the `partial_tuple_struct` semantics (`lib.rs:1678-1697`) and
@@ -630,11 +642,13 @@ implicit `.into()`; so `field: 5` sets `Some(5)` for both `Option<u32>` and
 Reflection equivalent (coercion step 3): `expected` is **optionish** iff its `TypeInfo` is
 `TypeInfo::Enum(e)` with exactly two variants, one named `None` (unit) and one named `Some`
 (tuple, 1 field). If so, and the produced value is not already of the expected type, then:
-```
+
+```text
 let inner_reg = registry.get(e.variant("Some")?.as_tuple_variant()?.field_at(0)?.ty().id())?;
 let inner = COERCE(produced, inner_reg)?;             // recurse the tail on the payload type
 DynamicEnum::new("Some", DynamicVariant::Tuple(DynamicTuple::from_iter([inner])))
 ```
+
 Explicit `None` / `Some(x)` in the document are just `BsnValue::Path`/`NamedTuple` and go
 through §4.6.3/§4.6.4 (the enum-variant path) and match by name, so both spellings work.
 
@@ -649,7 +663,7 @@ unwrapping a single-field tuple struct whose field is a list before matching.
 
 #### 4.6.8 `BsnValue::EntityRef(String)` — `#Name` as a value
 
-```
+```text
 if expected.type_id() != TypeId::of::<EntityTemplate>() {
     // still allow a user conversion into e.g. a newtype
     → COERCE(Box::new(entity_template), expected)
@@ -657,6 +671,7 @@ if expected.type_id() != TypeId::of::<EntityTemplate>() {
 let reference = SceneEntityReference::from_asset(cx.source_path_hash, cx.name_node_id(name));
 Box::new(EntityTemplate::SceneEntityReference(reference)) as Box<dyn Reflect>
 ```
+
 `SceneEntityReference::from_asset` is Contract C item 4, built on the ratified
 `SceneEntityReferenceSource` `Copy` enum (`CallSite { .. } | Asset { path_hash: u64 }`), so
 `EntityTemplate` stays `Copy`. `cx.source_path_hash` is the hash of `DynamicSceneInner::source`,
@@ -775,18 +790,19 @@ template. `AppTypeRegistry` is `AppTypeRegistry(pub TypeRegistryArc)`
 #### 4.7.3 `clone_template` — the reflect-clone ladder
 
 `clone_template` returns `Box<dyn ErasedComponentTemplate>` with **no error channel**, so
-the ladder must be total. Modelled on
+the ladder must be total. Modeled on
 `crates/bevy_world_serialization/src/reflect_utils.rs:11-24`, adapted to keep a *concrete*
 `Box<dyn Reflect>` (a `to_dynamic()` result is only `PartialReflect` and would break
 `build_template`, which takes `&dyn Reflect`):
 
-```
+```text
 1. self.value.reflect_clone()                                    → Box<dyn Reflect>
 2. self.reflect_from_reflect?.from_reflect(self.value.as_partial_reflect())
 3. let mut v = self.reflect_default.default();
    if let Ok(d) = self.value.to_dynamic() { let _ = v.try_apply(&*d); }   // best effort
    v
 ```
+
 Step 3 always yields a value of the right concrete type, so `clone_template` is infallible.
 Step 1 succeeds for every `#[derive(Reflect)]` type without `#[reflect(opaque)]` non-`Clone`
 fields, so 2 and 3 are cold paths.
@@ -824,6 +840,7 @@ impl Scene for DynamicScene {
     }
 }
 ```
+
 (`self.0.dependencies` already contains the base includes of *nested* entities plus every
 handle path; see §4.10. The root base is registered separately so the flattening step in
 §4.10 does not need to special-case it.)
@@ -947,7 +964,7 @@ Two directions. Both merge correctly, but by **different mechanisms**, because t
 type in the slot differs:
 
 | Direction | Slot's concrete type | Mechanism | Owner |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | dynamic patch → typed slot (§4.9.1) | the real template type `T` | `ReflectFromPtr` on `T` recovers `&mut dyn Reflect` in place | SPEC-4 |
 | typed patch → dynamic slot (§4.9.2) | `DynamicComponentTemplate` | C-7 typed recovery: `try_as_partial_reflect` + `ReflectFromReflect` → typed box replaces the slot | SPEC-2 |
 
@@ -1091,7 +1108,8 @@ Dependencies are computed **at build time**, not at dependency-walk time, and st
   nested ones are pushed into the flat list during the build walk.
 - **Handle strings.** In §4.6.2 step 4, immediately after a successful `ReflectConvert`,
   run:
-  ```
+
+  ```text
   let asset_type_id = expected.data::<ReflectTemplate>()          // addendum A-1
       .and_then(|t| registry.get(t.output_type_id))               // e.g. Handle<Image>
       .and_then(|r| r.data::<ReflectHandle>())                    // bevy_asset/src/reflect.rs
@@ -1100,6 +1118,7 @@ Dependencies are computed **at build time**, not at dependency-walk time, and st
       cx.dependencies.push((id, AssetPath::parse(s).into_owned()));
   }
   ```
+
   That is: *"the expected field type is a template whose output is a `Handle<A>`"*. This is
   the only structural test needed, it is generic over `A`, and it also covers any future
   template type that produces a handle.
@@ -1157,7 +1176,7 @@ Each step compiles and is independently testable.
 (SPEC-5).
 
 | Variant | Cause |
-|---|---|
+| --- | --- |
 | `UnknownType { type_path }` | §4.4.1 exhausted |
 | `TypeNotRegistered { type_path }` | a field/template/output `TypeId` has no registration |
 | `MissingReflectDefault { type_path }` | template type, or an enum-variant field type, lacks `ReflectDefault` |
@@ -1177,7 +1196,7 @@ Each step compiles and is independently testable.
 ### 6.2 Resolve-time errors (`ResolveSceneError`, Contract C item 5)
 
 | Variant | When |
-|---|---|
+| --- | --- |
 | `MissingSceneDependency(path)` | base `.bsn` not loaded — raised by `CachedSceneAsset::resolve` (`scene.rs:435`) |
 | `CachedSceneError(_)` | `MultipleCached` (two bases) or `LateCached` (base not first) — `resolved_scene.rs:551-561` |
 | `ApplyFailed { type_path, error }` | any `try_apply` failure in `resolve_patch` |
@@ -1191,31 +1210,37 @@ implementations. C-7's typed-recovery fallback (§4.9.2) is a logged `error!`, n
 `ResolveSceneError` — `get_or_insert_template` has no error channel.
 
 ### 6.3 Registry changed between load and resolve
+
 Type data is cloned into `DynamicPatch`, so unregistering a type after load does not break
 resolution; only §4.9.1's `ReflectFromPtr` lookup can observe the change and it returns an
 error. Registering a type *after* load does not retroactively fix a failed load — the load
 error already happened.
 
 ### 6.4 Two bases / late base
+
 SPEC-3's grammar allows at most one `:"…"` and requires it first; if a malformed document
 reaches us, `include_cached` produces `MultipleCached`/`LateCached`
 (`resolved_scene.rs:550-561`). We do not duplicate the check.
 
 ### 6.5 Empty document / entity with no entries
+
 `resolve` succeeds and contributes nothing; the spawned entity is empty. Matches
 `bsn! {}` (`empty_scene_expressions`, `lib.rs:2040`).
 
 ### 6.6 `~Type` on a type that is not a component template
+
 The output registration will lack `ReflectComponent` ⇒ `MissingReflectComponent` at build.
 Bundle templates (`ErasedBundleTemplate`) are not reachable from `.bsn`; SPEC-0 decision #4
 requires component templates so slots merge.
 
 ### 6.7 `&'static str` fields
+
 Rejected (`ValueTypeMismatch`). Producing a `&'static str` from document text requires
 `Box::leak`, which would leak unboundedly on every hot reload (SPEC-6). Users should use
 `String` or `Cow<'static, str>`. Documented in the `.bsn` reference (SPEC-5).
 
 ### 6.8 `#[template(built_in)]` fields — supported
+
 `OptionTemplate<T>` and `VecTemplate<T>` (`bevy_ecs/src/template.rs:520-586`) become
 `Reflect` in SPEC-1 Phase 5 (ratified, P1/P3), so `#[template(built_in)]` fields work:
 `OptionTemplate<T>` is an enum with `Some`/`None` variants and is therefore "optionish"
@@ -1227,6 +1252,7 @@ list before reporting `ValueTypeMismatch`. Blanket `Option<T>`/`Vec<T>` fields (
 case) continue to work directly via §4.6.6/§4.6.7.
 
 ### 6.9 `context.cached` and child entities
+
 Cleared and restored around each relation (§4.8 step 4). Without this, a child would clone
 the *base root's* template into itself and then hit
 `self.cached.as_mut().unwrap()` (`resolved_scene.rs:490-494`) on a scene with no cached
@@ -1235,6 +1261,7 @@ local child both patching the same component); SPEC-4 does not fix the macro pat
 not walk into it.
 
 ### 6.10 No panics anywhere
+
 - No `unwrap`/`expect` outside `debug_assert!`s and the two provably-safe `unwrap()`s
   (`try_as_partial_reflect_mut` right after `try_as_partial_reflect().is_some()`;
   `info.field_at(i)` right after a bounds check).
@@ -1253,7 +1280,7 @@ not walk into it.
 test that pins the expected outcome.
 
 | # | Scenario | Expected outcome | Mechanism | Reference test |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | 1 | D `Position { y: 2. }` then D `Position { x: 1. }` on one entity | `x=1, y=2, z=0` | one slot keyed by `TypeId::of::<PositionTemplate>()`; two `try_apply`s of disjoint `DynamicStruct`s | `cached_patching_order` `lib.rs:1050-1081` |
 | 2 | D `Foo { x: 1, nested: Bar(1,1) }` then D `Foo { y: 2, nested: Bar(2) }` | `Foo { x:1, y:2, z:0, nested: Bar(2,1,0) }` | §4.6.4 case A (nested partial) + §4.6.5 leading-tuple rule | `struct_patching` `lib.rs:1803-1850`; `field_patching_with_default` `lib.rs:1853-1899` |
 | 3 | D `TupleStruct(0.1)` on a `(f32, u32)` | `.0 = 0.1`, `.1 = 0` | §4.6.5: only index 0 present in the `DynamicTupleStruct` | `partial_tuple_struct` `lib.rs:1678-1697` |
@@ -1281,7 +1308,7 @@ All build a minimal `TypeRegistry` with the fixture types, call `build_value`, a
 on the produced `Box<dyn PartialReflect>` (via `try_apply` onto a concrete value + `assert_eq!`).
 
 | Test | Asserts |
-|---|---|
+| --- | --- |
 | `int_literal_exact_widths` | `1` into each of `i8..i128`, `u8..u128`, `isize`, `usize` yields the exactly-typed value |
 | `int_literal_out_of_range_errors` | `300` into `u8` ⇒ `IntegerOutOfRange`; `-1` into `u32` ⇒ `IntegerOutOfRange` |
 | `int_literal_into_float_exact` | `1` into `f32`/`f64` ⇒ `1.0` |
@@ -1314,7 +1341,7 @@ on the produced `Box<dyn PartialReflect>` (via `try_apply` onto a concrete value
 ### 8.2 Unit tests — `crates/bevy_scene/src/dynamic/build.rs`
 
 | Test | Asserts |
-|---|---|
+| --- | --- |
 | `resolve_symbol_unit_struct` / `_enum_variant` / `_fully_qualified` | §4.4.1 branches |
 | `resolve_symbol_unknown_type_errors` | `UnknownType` with the full path |
 | `resolve_symbol_unknown_variant_errors` | `a::MyEnum::Nope` ⇒ `UnknownVariant` (pcwalton would have accepted this) |
@@ -1328,7 +1355,7 @@ on the produced `Box<dyn PartialReflect>` (via `try_apply` onto a concrete value
 ### 8.3 Unit tests — `crates/bevy_scene/src/dynamic/template.rs`
 
 | Test | Asserts |
-|---|---|
+| --- | --- |
 | `dynamic_template_applies_component` | a hand-built `DynamicComponentTemplate` over `Position`, applied through `ResolvedSceneRoot::apply`, produces the component |
 | `dynamic_template_single_archetype_move` | spawning an entity with 3 dynamic templates results in exactly one archetype (assert `Archetype::components()` and that no intermediate archetype was created — mirrors `scene_expression_passing_pointless` `lib.rs:1700-1738`) |
 | `dynamic_template_uses_build_template` | a template with `ReflectTemplate` (e.g. `HandleTemplate<Image>`) produces the `Handle`, not the template |
@@ -1348,7 +1375,7 @@ they do not depend on SPEC-5's loader. Each uses `test_app()`-style setup
 (`lib.rs:980-988`) plus `app.register_type::<…>()` for the fixture types.
 
 | Test | Mirrors | Asserts |
-|---|---|---|
+| --- | --- | --- |
 | `dynamic_struct_patching` | `struct_patching` `lib.rs:1803` | row 2 of §7 |
 | `dynamic_field_patching_with_default` | `field_patching_with_default` `lib.rs:1853` | row 2 |
 | `dynamic_partial_tuple_struct` | `partial_tuple_struct` `lib.rs:1678` | row 3 |
@@ -1395,7 +1422,7 @@ they do not depend on SPEC-5's loader. Each uses `test_app()`-style setup
 ### 10.1 Closed by the review pass (SPEC-0 §7) — recorded for traceability
 
 | # | Question | Resolution |
-|---|---|---|
+| --- | --- | --- |
 | OQ-1 | Addendum A-1, `ReflectTemplate::output_type_id` | **RATIFIED** into SPEC-1's Contract A. §4.2, §4.4.2 and §4.10 now assume it unconditionally; the "degradation if absent" paragraph is deleted. |
 | OQ-2 | §4.9.2 typed-patch-over-dynamic-slot | **RESOLVED** by SPEC-2's ratified C-7 typed recovery (`ResolveContext::type_registry` + `ReflectFromReflect` conversion). §4.9.2 rewritten: the headline case now **merges**, it does not degrade. The crate-move + `ReflectTemplate::erase` proposal is retained only as a recorded upstream-alignment option. |
 | OQ-3 | Addendum C-6, `ErasedComponentTemplate::template_type_id` | **RATIFIED** into SPEC-2 as specced. |

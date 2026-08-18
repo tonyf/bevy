@@ -656,7 +656,7 @@ impl<'src> Parser<'src> {
         Ok(id)
     }
 
-    /// Looks ahead for a comma at the top level of the parenthesised group the cursor is
+    /// Looks ahead for a comma at the top level of the parenthesized group the cursor is
     /// currently inside, which distinguishes `(v)` (grouping) from `(v,)` (a 1-tuple).
     ///
     /// Generic argument lists count as nesting too, so the separator in `(Pair<f32, f32>)`

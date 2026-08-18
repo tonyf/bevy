@@ -2210,7 +2210,7 @@ mod tests {
         let root = app.world_mut().spawn(ScenePatchInstance(handle)).id();
         run_app_until(&mut app, |app| child_names(app, root) == ["A"]);
 
-        // An observer that reacts to the new generation of children by queueing another scene.
+        // An observer that reacts to the new generation of children by queuing another scene.
         app.world_mut()
             .add_observer(|add: On<Add, Name>, mut commands: Commands| {
                 commands

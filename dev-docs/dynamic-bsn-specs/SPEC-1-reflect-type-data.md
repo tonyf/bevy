@@ -65,12 +65,14 @@ dependency on `bevy_scene` and does not change `bevy_scene`.
 ### 3.1 The type-data mechanism
 
 - `CreateTypeData` trait: `crates/bevy_reflect/src/type_data.rs:132-144`.
+
   ```rust
   pub trait CreateTypeData<T, Input = ()>: TypeData {
       fn create_type_data(input: Input) -> Self;
       fn insert_dependencies(type_registration: &mut TypeRegistration) {}
   }
   ```
+
   `FromType` **no longer exists** anywhere in `crates/` (migration guide:
   `_release-content/migration-guides/bevy_reflect_parameterized_type_data.md`). pcwalton's
   `impl<T> FromType<T> for ReflectX { fn from_type() -> Self }` becomes
@@ -162,7 +164,7 @@ dynamic path (SPEC-0 decision 6), and `&mut World` is unavailable while a
 ### 4.1 Module layout
 
 | Path | Action |
-|---|---|
+| --- | --- |
 | `crates/bevy_ecs/src/reflect/mod.rs` | modify: add `mod relationship; mod template;`, re-exports, `FromReflectError`, `try_from_reflect_with_fallback`, refactor `from_reflect_with_fallback` |
 | `crates/bevy_ecs/src/reflect/template.rs` | **new** |
 | `crates/bevy_ecs/src/reflect/relationship.rs` | **new** |
@@ -341,7 +343,7 @@ pub fn from_reflect_with_fallback<T: Reflect + TypePath>(
 }
 ```
 
-Behaviour changes to `from_reflect_with_fallback`, all acceptable and to be called out in the PR
+Behavior changes to `from_reflect_with_fallback`, all acceptable and to be called out in the PR
 description:
 
 1. A type that is not registered at all now panics with "not registered in the `TypeRegistry`"
@@ -703,7 +705,7 @@ Differences from `RelatedResolvedScenes::new::<R>()` (`resolved_scene.rs:670-692
 mechanical:
 
 | there | here | why |
-|---|---|---|
+| --- | --- | --- |
 | generic over `R: Relationship` | generic over `T: RelationshipTarget` | Contract B registers on the target; `T::Relationship` recovers `R` |
 | `R::from(target)` | `<T::Relationship as Relationship>::from(target)` | same call, longer path |
 | `<<R as Relationship>::RelationshipTarget as RelationshipTarget>::with_capacity(c)` | `<T as RelationshipTarget>::with_capacity(c)` | `T` *is* the target |
@@ -791,7 +793,7 @@ For a relationship target — the attribute may be written as a **path**, avoidi
 Failure modes and what the compiler says (all pointed at the attribute ident):
 
 | mistake | diagnostic |
-|---|---|
+| --- | --- |
 | `ReflectFromTemplate` not in scope | `cannot find type ReflectFromTemplate in this scope` |
 | component has no custom `FromTemplate` and is not `Clone + Default + Unpin` | `the trait bound Sprite: FromTemplate is not satisfied` |
 | template type is not `Reflect` | `the trait bound SpriteTemplate: Reflect is not satisfied` |
@@ -865,7 +867,7 @@ generated `*Template` types is `Reflect`**, so none of them can carry `#[reflect
 until Phase 5 lands. Phase 5 seed set (non-generic, already `Reflect`, high value for `.bsn`):
 
 | component | file | template |
-|---|---|---|
+| --- | --- | --- |
 | `Sprite` | `crates/bevy_sprite/src/sprite.rs:15` | `SpriteTemplate` |
 | `ImageNode` | `crates/bevy_ui/src/widget/image.rs:15` | `ImageNodeTemplate` |
 | `TextFont` | `crates/bevy_text/src/text.rs:669` | `TextFontTemplate` |
@@ -1031,9 +1033,11 @@ separate PR, but SPEC-4 cannot land without it.
 **Step 11a — `Reflect` for the built-in collection templates.**
 In `crates/bevy_ecs/src/template.rs`, add to `OptionTemplate<T>` (`:521-528`) and
 `VecTemplate<T>` (`:564`):
+
 ```rust
 #[cfg_attr(feature = "bevy_reflect", derive(bevy_reflect::Reflect))]
 ```
+
 No `#[reflect(Default)]` (their `Default` impls are generic and would need a manual
 `#[reflect(where …)]`; SPEC-4 constructs them by conversion/`FromReflect`, not by `Default`).
 `TemplateTuple<T>` (`:384`) gets the same treatment only if a field of that type appears in a
@@ -1046,19 +1050,23 @@ entity references and must be `Reflect` for SPEC-4 to construct one reflectively
 `Hashed<InnerSceneEntityReference>` containing a `&'static str`. Fix, in order:
 
 1. On `SceneEntityReference` (`template.rs:142`):
+
    ```rust
    #[cfg_attr(feature = "bevy_reflect", derive(bevy_reflect::Reflect))]
    #[cfg_attr(feature = "bevy_reflect", reflect(opaque, Clone, PartialEq, Hash, Debug))]
    ```
+
    `#[reflect(opaque)]` treats the value as a leaf: no field reflection, no `TypePath` demands on
    `Hashed`/`InnerSceneEntityReference`. It requires `Clone + Send + Sync + 'static`, all of
    which `SceneEntityReference` already has (it is `Copy`). Opaque is the right semantic anyway —
    `.bsn` never patches a reference's *fields*, it constructs whole references.
 2. On `EntityTemplate` (`template.rs:421`):
+
    ```rust
    #[cfg_attr(feature = "bevy_reflect", derive(bevy_reflect::Reflect))]
    #[cfg_attr(feature = "bevy_reflect", reflect(Default, Clone, Debug, crate::reflect::Template))]
    ```
+
    `EntityTemplate` is a `#[derive(Default)]` enum with `#[default] None`, its `Output` is
    `Entity` (which is `Reflect`), so both `ReflectDefault` and `ReflectTemplate` bounds hold.
 3. Register both in whatever registers core `bevy_ecs` types — search for
@@ -1074,6 +1082,7 @@ already ratifies the `Copy` enum for exactly this reason).
 
 **Step 12 — `#[template(reflect)]` in the `FromTemplate` derive.**
 In `crates/bevy_ecs/macros/src/template.rs`:
+
 - add `const TEMPLATE_REFLECT_ATTRIBUTE: &str = "reflect";`
 - before building `template`, scan `ast.attrs` for `#[template(...)]` at container level and set
   `let derive_reflect: bool` when it contains the bare ident `reflect`. Emit a
@@ -1083,10 +1092,12 @@ In `crates/bevy_ecs/macros/src/template.rs`:
   (same pattern as line 15's `get_path("bevy_ecs")`).
 - when `derive_reflect`, prepend to each of the four generated `#template_ident` definitions
   (lines 40, 71, 102, and the enum at ~273):
+
   ```rust
   #[derive(#bevy_reflect::Reflect)]
   #[reflect(Default, #bevy_ecs::reflect::Template)]
   ```
+
   and **nothing else** — in particular never `from_reflect = false`, so that the derive keeps
   auto-registering `ReflectFromReflect` (§4.9.2; SPEC-2's C-7 recovery depends on it).
   The path form is required — the generated code lands in the *user's* module, where
@@ -1137,7 +1148,7 @@ the existing `register_type::<Sprite>()` call. Verify per type with
 8. **Immutable components** — supported (see §4.3). Asserted by
    `push_to_bundle_writer_supports_immutable_components`.
 9. **Error mid-bundle leaks** — documented caller obligation (`BundleScratch::manual_drop`).
-   SPEC-4 must honour it; SPEC-1 only documents it.
+   SPEC-4 must honor it; SPEC-1 only documents it.
 10. **`Children` already carrying a custom `ReflectComponent`** — `insert_dependencies` would
     overwrite it with the default one. No such case exists in-repo (nothing constructs a custom
     `ReflectComponent` for a relationship target); the same hazard already exists for
@@ -1160,7 +1171,7 @@ All tests are `#[cfg(test)] mod tests` in the file under test unless stated othe
 ### 7.1 `crates/bevy_ecs/src/reflect/mod.rs`
 
 | test | asserts |
-|---|---|
+| --- | --- |
 | `try_from_reflect_unregistered_type_errors` | a type never registered → `Err(FromReflectError::NotRegistered { .. })` |
 | `try_from_reflect_missing_constructor_errors` | registered with `#[reflect(no_auto_register)]`-style bare `Reflect` but `from_reflect = false` and no `Default` → `Err(MissingConstructor)`, and the message contains "`FromReflect` or `Default` traits" (i.e. *not* `FromWorld`) |
 | `try_from_reflect_uses_from_reflect` | a `DynamicStruct` with all fields → `Ok(value)` equal to the expected struct |
@@ -1174,7 +1185,7 @@ Fixtures: `struct CustomComponent(u32)` with a hand-written
 `#[derive(Reflect)]`; plus `#[derive(Component, Reflect, Clone, Default)] struct Plain(u32)`.
 
 | test | asserts |
-|---|---|
+| --- | --- |
 | `from_template_reports_custom_template` | `registry.get_type_data::<ReflectFromTemplate>(TypeId::of::<CustomComponent>()).unwrap().template_type_id == TypeId::of::<CustomComponentTemplate>()` |
 | `from_template_reports_template_type_path` | the same data's `template_type_path == <CustomComponentTemplate as TypePath>::type_path()`, and the assertion holds **without** `CustomComponentTemplate` itself being registered (that is the case the field exists for) |
 | `template_reports_output_type_id` | `registry.get_type_data::<ReflectTemplate>(TypeId::of::<CustomComponentTemplate>()).unwrap().output_type_id == TypeId::of::<CustomComponent>()` |
@@ -1193,7 +1204,7 @@ entity = world.spawn_empty(); let mut ctx = TemplateContext::new(&mut entity, &m
 ### 7.3 `crates/bevy_ecs/src/reflect/relationship.rs`
 
 | test | asserts |
-|---|---|
+| --- | --- |
 | `children_registers_reflect_relationship` | after `registry.register::<Children>()`, `get_type_data::<ReflectRelationshipTarget>(TypeId::of::<Children>())` is `Some`, `relationship_type_id == TypeId::of::<ChildOf>()`, `relationship_target_type_id == TypeId::of::<Children>()`, `relationship_name == core::any::type_name::<ChildOf>()` |
 | `reflect_relationship_target_registers_reflect_component` | the same registration also yields `get_type_data::<ReflectComponent>(TypeId::of::<Children>())` (`insert_dependencies`) |
 | `reflect_relationship_target_inserts_relationship` | using a `BundleScratch`, call `insert_relationship(&mut writer, &mut registrator, parent)` then `write(&mut child)`; assert `child.get::<ChildOf>().unwrap().parent() == parent` and `parent` has `Children` containing `child` (the relationship hook ran) |
@@ -1205,7 +1216,7 @@ Model the `BundleScratch` usage on `crates/bevy_ecs/src/bundle/writer.rs:185-204
 ### 7.4 `crates/bevy_ecs/src/reflect/component.rs`
 
 | test | asserts |
-|---|---|
+| --- | --- |
 | `push_to_bundle_writer_takes_concrete_value` | `Box::new(Marker(3)) as Box<dyn PartialReflect>` is pushed and written; entity has `Marker(3)`. Fixture has **no** `Default` and `from_reflect = false`, proving the fast path never touches the ladder |
 | `push_to_bundle_writer_uses_from_reflect` | a `DynamicStruct` representing `Marker { value: 3 }` produces `Marker { value: 3 }` |
 | `push_to_bundle_writer_uses_default_fallback` | partial `DynamicStruct` (one of two fields) on a `#[reflect(Default)] from_reflect = false` type → other field is the default |
@@ -1238,7 +1249,7 @@ rustdoc instead.
 In `crates/bevy_ecs/src/template.rs` tests:
 
 | test | asserts |
-|---|---|
+| --- | --- |
 | `template_reflect_attribute_generates_reflect_template` | a local `#[derive(FromTemplate)] #[template(reflect)] struct Foo { count: usize }` yields a `FooTemplate` for which `TypeRegistry::register::<FooTemplate>()` then `get_type_data::<ReflectTemplate>()` is `Some` with `output_type_id == TypeId::of::<Foo>()` |
 | `generated_template_has_from_reflect` | the same registration also has `ReflectFromReflect` **and** `ReflectDefault` — pins §4.9.2, the requirement SPEC-2's C-7 recovery depends on |
 | `generated_template_round_trips_through_from_reflect` | a partial `DynamicStruct` for `FooTemplate` → `try_from_reflect_with_fallback::<FooTemplate>` → `Ok`, with the unpatched field defaulted |

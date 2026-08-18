@@ -53,7 +53,7 @@ Target: `/home/tony/workspace/bevy`, Bevy `main`, `0.20.0-dev`.
 Everything below was read and is binding on this design.
 
 | What | Where |
-|---|---|
+| --- | --- |
 | Authoritative `bsn!` syntax table (all forms, values, scene lists) | `crates/bevy_scene/macros/src/lib.rs:11-130` |
 | `bsn!` parser: entries, `:`/`#`/`@`/`~` prefixes, path classification | `crates/bevy_scene/macros/src/bsn/parse.rs:99-180` |
 | `:` include restricted to `LitStr`; "Cannot use scene assets without caching" | `crates/bevy_scene/macros/src/bsn/parse.rs:208-241` |
@@ -78,7 +78,7 @@ His grammar file was not available; this spec derives the grammar from his AST s
 
 ### 4.1 Files
 
-```
+```text
 crates/bevy_bsn/Cargo.toml
 crates/bevy_bsn/README.md          // included as crate docs via #![doc = include_str!]
 crates/bevy_bsn/LICENSE-MIT        // copy of the workspace file, as every bevy crate has
@@ -95,7 +95,7 @@ crates/bevy_bsn/src/tests.rs       // #[cfg(test)] corpus, table tests, round-tr
 The workspace root manifest lists `members = ["crates/*"]` (`Cargo.toml:17-19`), so the
 crate joins the workspace with no root-manifest edit.
 
-### 4.2 `crates/bevy_bsn/Cargo.toml` (complete, modelled on `crates/bevy_ptr/Cargo.toml`)
+### 4.2 `crates/bevy_bsn/Cargo.toml` (complete, modeled on `crates/bevy_ptr/Cargo.toml`)
 
 ```toml
 [package]
@@ -177,7 +177,7 @@ library item may reference `std`.
 **Std-ism audit of the §6–§9 designs** (every item verified available in `core`/`alloc`):
 
 | Design element | Provided by | Note |
-|---|---|---|
+| --- | --- | --- |
 | `String`, `Vec`, `format!`, `vec!`, `ToString` | `alloc` | imported explicitly per file |
 | `write!` into a `String` | `core::fmt::Write` | `alloc::string::String` implements it; the printer is written against `core::fmt::Write`, not `std::io::Write` |
 | `f64::from_str` (`decode_float`) | `core` (`core::num::dec2flt`) | `impl FromStr for f64` lives in `core` |
@@ -231,22 +231,24 @@ struct, the printer's internal writer — stays private.
 
 The README opens with (wording normative, prose may be polished):
 
-> # `bevy_bsn`
->
-> Parser, abstract syntax tree, and printer for **BSN** (Bevy Scene Notation) — a compact,
-> human-readable, git-diffable text format for describing entities, their components and
-> their relationships in an ECS.
->
-> This crate is **engine-agnostic**: it depends on nothing but `core`, `alloc` and
-> `thiserror`, knows nothing about Bevy's `World`, reflection or asset systems, and works on
-> `no_std` targets. It reads `.bsn` text into a plain data AST and writes that AST back out
-> as canonical `.bsn` text, so external tooling — exporters, importers, editors, language
-> servers — can round-trip scene files without linking a game engine.
->
-> Bevy's own `bevy_scene` crate is the reference consumer: it resolves this AST against
-> `bevy_reflect`'s type registry to spawn entities. Nothing in this crate assumes that
-> consumer; the AST refers to types only by *type path string*, and what those strings mean
-> is entirely up to whoever resolves them.
+```markdown
+# `bevy_bsn`
+
+Parser, abstract syntax tree, and printer for **BSN** (Bevy Scene Notation) — a compact,
+human-readable, git-diffable text format for describing entities, their components and
+their relationships in an ECS.
+
+This crate is **engine-agnostic**: it depends on nothing but `core`, `alloc` and
+`thiserror`, knows nothing about Bevy's `World`, reflection or asset systems, and works on
+`no_std` targets. It reads `.bsn` text into a plain data AST and writes that AST back out
+as canonical `.bsn` text, so external tooling — exporters, importers, editors, language
+servers — can round-trip scene files without linking a game engine.
+
+Bevy's own `bevy_scene` crate is the reference consumer: it resolves this AST against
+`bevy_reflect`'s type registry to spawn entities. Nothing in this crate assumes that
+consumer; the AST refers to types only by *type path string*, and what those strings mean
+is entirely up to whoever resolves them.
+```
 
 Also required in the README (crates.io front page): a 15-line syntax sample (corpus §12.3),
 a "reading" example (`parse`), a "writing" example (build an AST with the §7.10 builder and
@@ -257,6 +259,7 @@ a "reading" example (`parse`), a "writing" example (build an AST with the §7.10
 - `crates/bevy_scene/Cargo.toml` gains
   `bevy_bsn = { path = "../bevy_bsn", version = "0.20.0-dev", optional = true }`
   and a `[features]` section (the crate has none today, `Cargo.toml:1-29`):
+
   ```toml
   [features]
   default = ["bsn_asset"]
@@ -264,6 +267,7 @@ a "reading" example (`parse`), a "writing" example (build an AST with the §7.10
   ## resolver (SPEC-4) and `DynamicBsnLoader` (SPEC-5).
   bsn_asset = ["dep:bevy_bsn"]
   ```
+
 - SPEC-4 and SPEC-5 import from the crate: `use bevy_bsn::{parse, BsnDocument, BsnNodeKind,
   BsnValue, BsnPath, BsnParseError, Span};`. They must **not** re-declare any of these types.
 - `bevy_scene` re-exports the crate behind the feature so Bevy users need no extra
@@ -339,7 +343,7 @@ Notes, each traceable to the macro:
 - A document is a **scene list without brackets** — exactly the body of `bsn_list![ … ]`
   (`macros/src/bsn/parse.rs:189-206`). One root needs no comma and may be written flat;
   two or more roots are comma-separated. An **empty document is legal** and yields zero roots.
-- `entity_body` inside `( … )` matches `Bsn<ALLOW_FLAT>`'s parenthesised branch
+- `entity_body` inside `( … )` matches `Bsn<ALLOW_FLAT>`'s parenthesized branch
   (`parse.rs:62-74`); the flat branch matches `parse.rs:75-90`, including the rule that a
   top-level comma terminates the current entity.
 - `base` must be the **first** entry; a `:` entry anywhere else is an error (§8.2 E-BASE-POS),
@@ -420,7 +424,7 @@ The parser detects each of these **structurally** and emits the exact message be
 `{kind}` in the diagnostics is filled from context. All messages end with a remedy.
 
 | # | Construct | Detected when | Error code | Message |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | 1 | `{ expr }` | `{` in value position, or `{` where an entry is expected | `E-EXPR` | ``Rust expressions (`{ ... }`) are not supported in `.bsn` assets. Only literal values are allowed here; move the computation into a `bsn!` macro or a scene function.`` |
 | 2 | `const { .. }`, `unsafe { .. }` | IDENT `const`/`unsafe` followed by `{` | `E-EXPR` | same as #1 |
 | 3 | closure `\|x\| { .. }` | `\|` anywhere | `E-CLOSURE` | ``Closures are not supported in `.bsn` assets. Observers and template functions must be written in Rust.`` |
@@ -514,6 +518,7 @@ unlimited lookahead and trivial `peek`/`peek2`).
 `next_token` runs `skip_trivia()` then dispatches on the first `char` `c` at `pos`:
 
 **`skip_trivia()`** loops until no progress:
+
 1. `c.is_whitespace()` ⇒ consume. (Covers ` `, `\t`, `\n`, `\r`, and Unicode spaces.)
 2. `//` ⇒ consume through the next `\n` or EOF. (`///` and `//!` are ordinary comments; no
    doc capture in v1, open question §14.6.)
@@ -525,7 +530,7 @@ unlimited lookahead and trivial `peek`/`peek2`).
 **Dispatch table** (first match wins; `start = pos` before consuming):
 
 | Input | Action | Token |
-|---|---|---|
+| --- | --- | --- |
 | EOF | — | `Eof`, span `(len, len)` |
 | `(` `)` `{` `}` `[` `]` `,` `#` `@` `~` `<` `>` | consume 1 | matching kind |
 | `:` followed by `:` | consume 2 | `ColonColon` |
@@ -546,6 +551,7 @@ An `Error` token **always consumes at least one `char`**, so the lexer cannot lo
 ### 6.4 String literals
 
 Normal string: after the opening `"`, consume until an unescaped `"`.
+
 - `\` starts an escape; the lexer validates it immediately: one of
   `\\ \" \' \n \r \t \0`, `\xNN` (exactly 2 hex digits, value ≤ `0x7F`), or
   `\u{H…}` (1–6 hex digits, a valid `char`). Anything else ⇒ `Error(InvalidEscape)`
@@ -560,7 +566,7 @@ The `Str` token's span **includes** all delimiters.
 
 ### 6.5 Numbers
 
-```
+```text
 INT   = dec | "0x" hex+ | "0o" oct+ | "0b" bin+          (with `_` allowed after the 1st digit)
 dec   = digit { digit | "_" }
 FLOAT = dec "." [ dec ] [ exp ] | dec exp
@@ -571,6 +577,7 @@ Scanner: consume the integer part (with optional `0x`/`0o`/`0b` prefix — prefi
 not be followed by `.` or an exponent). For a decimal integer, if the next char is `.` **and**
 the char after it is not `.`, consume the `.` plus any following digits, then an optional
 exponent, and emit `Float`. Otherwise emit `Int`.
+
 - After the number, if the next char is an ident-start char ⇒ `Error(NumericSuffix)` spanning
   number+suffix (covers `1u8`, `1.0f32`, and `0x1g`).
 - A prefix with no digits (`0x`) ⇒ `Error(InvalidNumber)`.
@@ -579,7 +586,7 @@ exponent, and emit `Float`. Otherwise emit `Int`.
 Value decoding (parser-side helpers in `lexer.rs`, all returning `Result<_, BsnParseError>`):
 
 ```rust
-pub fn decode_int(source: &str, span: Span) -> Result<i128, BsnParseError>;   // strips `_`, honours 0x/0o/0b
+pub fn decode_int(source: &str, span: Span) -> Result<i128, BsnParseError>;   // strips `_`, honors 0x/0o/0b
 pub fn decode_float(source: &str, span: Span) -> Result<f64, BsnParseError>;  // strips `_`, core f64 FromStr
 pub fn decode_string(source: &str, span: Span) -> Result<String, BsnParseError>; // unescapes; raw strings verbatim
 ```
@@ -743,7 +750,7 @@ For every `BsnNodeKind::Patch { symbol, value, .. }`, `document.values[value]` i
 of:
 
 | Source | `BsnValue` | Invariant |
-|---|---|---|
+| --- | --- | --- |
 | `Foo` | `Path(p)` | `p == symbol` |
 | `Foo { … }` | `Struct(p, fields)` | `p == symbol` |
 | `Foo( … )` | `NamedTuple(p, items)` | `p == symbol` |
@@ -835,7 +842,7 @@ impl BsnDocument {
    `BsnNodeId`. A synthesized document (all spans `Span::NONE`, §7.10) therefore prints in
    id order — patches and relations interleave exactly as the builder created them.
 4. **Patch**: `<prefix><type path><body>` where prefix is `""`, `"~"` or `"@"`.
-   `Path` value ⇒ no body. `Struct` ⇒ ` { … }`. `NamedTuple` ⇒ `( … )` with no space.
+   `Path` value ⇒ no body. `Struct` ⇒ `{ … }`. `NamedTuple` ⇒ `( … )` with no space.
 5. **Bodies** (struct fields, tuple items, list items): rendered inline, comma+space
    separated, if the resulting line (indent + content) is ≤ `max_inline_width` **and**
    contains no nested multi-line body; otherwise one item per line at indent + 1, with a
@@ -861,7 +868,7 @@ impl BsnDocument {
 For every `BsnDocument` `d` that either came from `parse` or was built through the §7.10
 builder:
 
-```
+```text
 parse(&print_document(&d))  ==  d      // modulo spans, via BsnDocument::structural_eq
 print_document(&parse(&print_document(&d)))  ==  print_document(&d)   // text-identical
 ```
@@ -989,10 +996,10 @@ the first is speculative. pcwalton's loader has the same limitation
 (`dynamic_bsn.rs:113` `// TODO: Report multiple errors`). Multi-error recovery is
 open question §11.4.
 
-### 8.4 Edge cases (exhaustive list, each with defined behaviour)
+### 8.4 Edge cases (exhaustive list, each with defined behavior)
 
-| Case | Behaviour |
-|---|---|
+| Case | Behavior |
+| --- | --- |
 | Empty file / only comments | `Ok` with `roots: []` |
 | Leading UTF-8 BOM | skipped |
 | CRLF line endings | whitespace; spans stay byte-accurate |
@@ -1055,7 +1062,7 @@ struct Parser<'src> {
 Primitives (all infallible except `expect`):
 
 | Fn | Meaning |
-|---|---|
+| --- | --- |
 | `peek() -> TokenKind` / `peek_at(n)` | lookahead without consuming (`Eof` past the end) |
 | `peek_token() -> Token` | current token with span |
 | `bump() -> Token` | consume and return |
@@ -1069,9 +1076,10 @@ Primitives (all infallible except `expect`):
 
 ### 9.3 Parse functions (one per production)
 
-Each function is listed with its production, its entry condition and its exact behaviour.
+Each function is listed with its production, its entry condition and its exact behavior.
 
 **`parse_document() -> Result<BsnDocument, _>`** — `document = [ entity_list ] EOF`
+
 1. If `peek() == Eof` return the empty document.
 2. `roots = parse_entity_list(Eof)?`.
 3. `expect(Eof, &["`,`", "end of file"])`.
@@ -1090,6 +1098,7 @@ first token start .. last consumed token end; `leave()`.
 The flat form stops at `Comma`, `RBracket`, `RParen` or `Eof` (mirrors `parse.rs:85-89`).
 
 **`parse_entity_body(id, stop) -> Result<(), _>`** — `entity_body = [ base ] { entry }`
+
 1. If `peek() == Colon`: consume; `expect(Str, &["string literal"])` — a non-`Str` token is
    `BaseNotString`; store `base`/`base_span`.
 2. Loop until `peek()` is in the stop set: `parse_entry(id)?`.
@@ -1098,6 +1107,7 @@ The flat form stops at `Comma`, `RBracket`, `RParen` or `Eof` (mirrors `parse.rs
 
 **`parse_entry(entity: &mut EntityBuilder) -> Result<(), _>`** — `entry = name_entry | relation_entry | patch_entry`
 Dispatch on `peek()`:
+
 - `Colon` ⇒ `BaseNotFirst`.
 - `Hash` ⇒ consume, `expect(Ident)`; if `entity.name.is_some()` ⇒ `DuplicateName`; store.
 - `LBrace` ⇒ `unsupported::EXPR`.
@@ -1108,6 +1118,7 @@ Dispatch on `peek()`:
 - anything else ⇒ `UnexpectedToken` with `expected = ["type path", "`#`", "`~`", "`@`"]`.
 
 **`parse_patch(prefix) -> Result<(), _>`** — `patch_entry`, `relation_entry`
+
 1. `path = parse_path()?`.
 2. `classify_entry_path(&path)?` — §5.5 rules #5/#6/#7: last segment lowercase-initial ⇒
    `FN` (or `CTOR` if the previous segment is uppercase-initial and the next token is
@@ -1124,6 +1135,7 @@ otherwise ⇒ `Path(path)`. Upholds §7.5.
 
 **`parse_struct_body() -> Result<Vec<(String, BsnValueId)>, _>`** — `struct_body`
 `expect(LBrace)`; loop until `RBrace`:
+
 - `At` ⇒ `unsupported::PROP`.
 - `expect(Ident)` → name; if `peek() != Colon` ⇒ `unsupported::SHORTHAND`;
   `expect(Colon)`; `value = parse_value()?`; reject a repeated name with `DuplicateField`.
@@ -1138,7 +1150,7 @@ otherwise ⇒ `Path(path)`. Upholds §7.5.
 `enter()`; reserve `id = alloc_value()`; dispatch on `peek()`:
 
 | Token | Result |
-|---|---|
+| --- | --- |
 | `Int` | `Int(decode_int(..)?)` |
 | `Float` | `Float(decode_float(..)?)` |
 | `Str` | `String(decode_string(..)?)` |
@@ -1234,7 +1246,7 @@ fn lex_spanned(src: &str) -> Vec<(TokenKind, u32, u32)>;   // helper
 ```
 
 | Test | Asserts |
-|---|---|
+| --- | --- |
 | `lex_punctuation_table` | table of 16 rows, one per punctuation token, each `"x"` → `[Kind]` with span `(0, n)` |
 | `lex_colon_vs_coloncolon` | `":: :"` → `[ColonColon, Colon]`; `"a::b"` → `[Ident, ColonColon, Ident]` |
 | `lex_idents_table` | `_a`, `A1`, `étoile`, `r` (bare) → `Ident`; spans exact |
@@ -1256,13 +1268,14 @@ One test per corpus document in §12, named `parse_corpus_<n>_<slug>`, each asse
 `doc.debug_tree() == EXPECTED` against the inline string given in §12. `debug_tree` format
 (also specified here because tests depend on it byte-for-byte):
 
-```
+```text
 Entity#<id> name=<"Name"|-> base=<"path"|->
   Patch#<id> <patch|template|scene> `<type path>` value=$<id>
   Relation#<id> `<type path>`
     <nested Entity lines, indented by 2>
 $<id> <value>
 ```
+
 Value rendering: `Unit`, `Bool(true)`, `Int(-3)`, `Float(1.0)` (`{:?}`, with `inf`/`-inf`/`NaN`),
 `Str("…")` (re-escaped), `Path(a::B)`, `EntityRef(Name)`, `Tuple`, `List`,
 `Struct(a::B)`, `NamedTuple(a::B)`; children of a value are printed on following lines
@@ -1272,7 +1285,7 @@ indented by 2, struct fields prefixed `field <name> = $<id>`. Values are printed
 Additional structural tests:
 
 | Test | Asserts |
-|---|---|
+| --- | --- |
 | `parse_empty_document` | `""` and `"// only a comment"` → `roots.is_empty()` |
 | `parse_node_ids_are_preorder` | for corpus 3, `roots == [BsnNodeId(0)]` and the child entity ids ascend in source order |
 | `parse_node_ids_stable_across_reparse` | parse the same text twice → `debug_tree()` equal, and each entity id equal |
@@ -1287,7 +1300,7 @@ Because external tools depend on the printer as much as on the parser, this suit
 large as the parser suite.
 
 | Test | Asserts |
-|---|---|
+| --- | --- |
 | `roundtrip_corpus_structural` | for each §12 corpus doc `d`: `parse(&print_document(&d)).structural_eq(&d)` — the normative property of §7.9 |
 | `roundtrip_corpus_debug_tree` | same, but compares `debug_tree()` strings, so a failure diff is readable |
 | `print_is_idempotent` | `print(parse(print(parse(s)))) == print(parse(s))` byte-for-byte, for every corpus doc — the printer is a formatter with a fixed point |
@@ -1314,7 +1327,7 @@ large as the parser suite.
 span:
 
 | Test | Input | Expects |
-|---|---|---|
+| --- | --- | --- |
 | `reject_expr_entry` | `{ my_scene() }` | `unsupported::EXPR`, span of `{` |
 | `reject_expr_value` | `A { x: { 1 + 2 } }` | `unsupported::EXPR` |
 | `reject_expr_const_block` | `A { x: const { 1 } }` | `unsupported::EXPR` |
@@ -1342,12 +1355,12 @@ span:
 | `reject_nesting_too_deep` | 200 nested `[` | `NestingTooDeep` (and the test must not overflow the stack) |
 | `reject_unclosed_brace` | `A { x: 1` | `UnexpectedEof`, `expected` contains `"`,`"` and `"`}`"` |
 | `reject_tilde_relation` | `~Children [ ]` | `UnexpectedToken` mentioning `~`/`@` |
-| `error_messages_end_with_a_remedy` | every `unsupported::*` constant contains "`.bsn`" and is ≥ 40 chars |
+| `error_messages_end_with_a_remedy` | (all constants) | every `unsupported::*` constant contains "`.bsn`" and is ≥ 40 chars |
 
 ### 11.5 Hygiene tests (crate-independence, `no_std`, determinism)
 
 | Test | Asserts |
-|---|---|
+| --- | --- |
 | `manifest_has_no_bevy_dependencies` | `include_str!("../Cargo.toml")` contains no `bevy_` outside the `[package] name` line, and lists exactly one dependency (`thiserror`). This is the machine-checked form of the §4.2 dependency policy. |
 | `sources_have_no_bevy_or_std_references` | `include_str!` each of the six source files; none contains `"bevy_"`, `"std::"` or `"use std"` (the `extern crate std` line in `lib.rs` is the sole allowed occurrence and is matched exactly) |
 | `parse_is_deterministic` | parsing corpus §12.8 ten times yields identical `debug_tree()` |
@@ -1370,7 +1383,8 @@ Each example is a complete `.bsn` document. `debug_tree` output is given in the 
 ```bsn
 bevy_transform::components::transform::Transform
 ```
-```
+
+```text
 Entity#0 name=- base=-
   Patch#1 patch `bevy_transform::components::transform::Transform` value=$0
 values:
@@ -1387,7 +1401,8 @@ bevy_transform::components::transform::Transform {
     scale: glam::Vec3 { x: 1.0 },
 }
 ```
-```
+
+```text
 Entity#0 name="Camera" base=-
   Patch#1 patch `bevy_camera::components::Camera3d` value=$0
   Patch#2 patch `bevy_transform::components::transform::Transform` value=$1
@@ -1407,6 +1422,7 @@ $6 Struct(glam::Vec3)
   field x = $7
 $7 Float(1.0)
 ```
+
 Note `scale` sets only `x`; `y`/`z` keep the value from earlier patches or `Default`
 (SPEC-4). `#Camera` sets `name`, not a `Name` patch — SPEC-4 emits the `Name` component.
 
@@ -1421,7 +1437,8 @@ bevy_ecs::hierarchy::Children [
     my_game::Follower { target: #Root }
 ]
 ```
-```
+
+```text
 Entity#0 name="Root" base=-
   Patch#1 patch `bevy_ui::ui_node::Node` value=$0
   Relation#2 `bevy_ecs::hierarchy::Children`
@@ -1438,6 +1455,7 @@ $3 Struct(my_game::Follower)
   field target = $4
 $4 EntityRef(Root)
 ```
+
 Ids show the pre-order rule: the relation (#2) precedes its children (#3, #5), and the second
 child's id follows the first child's whole subtree. `#Root` is visible to descendants
 (`crates/bevy_scene/src/lib.rs:193-201`); resolving the reference is SPEC-4's job.
@@ -1451,7 +1469,8 @@ bevy_ecs::hierarchy::Children [
     my_game::Weapon
 ]
 ```
-```
+
+```text
 Entity#0 name=- base="enemies/orc.bsn"
   Patch#1 patch `my_game::Health` value=$0
   Relation#2 `bevy_ecs::hierarchy::Children`
@@ -1463,6 +1482,7 @@ $0 Struct(my_game::Health)
 $1 Int(200)
 $2 Path(my_game::Weapon)
 ```
+
 Semantics (SPEC-4): the base is included **first** as a `CachedSceneAsset`, then the patches
 apply on top — identical to `bsn! { :"enemies/orc.bsn" Health { max: 200 } }`
 (`macros/src/bsn/parse.rs:101-102`, `crates/bevy_scene/src/lib.rs:388-395`).
@@ -1474,7 +1494,8 @@ bevy_camera::visibility::Visibility::Visible
 my_game::Shape::Circle { radius: 2.5 }
 my_game::Shape::Rect(1.0, 2.0)
 ```
-```
+
+```text
 Entity#0 name=- base=-
   Patch#1 patch `bevy_camera::visibility::Visibility::Visible` value=$0
   Patch#2 patch `my_game::Shape::Circle` value=$1
@@ -1490,6 +1511,7 @@ $3 NamedTuple(my_game::Shape::Rect)
 $4 Float(1.0)
 $5 Float(2.0)
 ```
+
 **The parser does not know these are enum variants** (§7.6). SPEC-4 tries
 `get_with_type_path("my_game::Shape::Circle")`, fails, then
 `get_with_type_path("my_game::Shape")` + variant `Circle`
@@ -1505,7 +1527,8 @@ my_game::Waypoints([1.0, 2.0, 3.0])
 my_game::Marker(())
 my_game::Pair((1, 2))
 ```
-```
+
+```text
 Entity#0 name=- base=-
   Patch#1 patch `my_game::Rgba` value=$0
   Patch#2 patch `bevy_render::mesh::components::Mesh3d` value=$3
@@ -1541,6 +1564,7 @@ $13 Tuple
 $14 Int(1)
 $15 Int(2)
 ```
+
 `Rgba(1.0, 0.5)` sets tuple fields 0 and 1 and leaves the rest defaulted (partial leading
 prefix, §5.3). The `Mesh3d` string becomes a `Handle` in SPEC-4 via `ReflectConvert`
 (SPEC-0 §6 decision 8); `#Mesh0/Primitive0` inside the string is *not* an entity reference —
@@ -1553,7 +1577,8 @@ it is inside a string literal. **`[ … ]` as a value is the one deliberate supe
 ~bevy_asset::handle::HandleTemplate<bevy_image::image::Image>("icon.png")
 @my_game::HealthBar { width: 100 }
 ```
-```
+
+```text
 Entity#0 name=- base=-
   Patch#1 template `bevy_asset::handle::HandleTemplate<bevy_image::image::Image>` value=$0
   Patch#2 scene `my_game::HealthBar` value=$2
@@ -1565,6 +1590,7 @@ $2 Struct(my_game::HealthBar)
   field width = $3
 $3 Int(100)
 ```
+
 `~` means "this path is already a `Template`, do not go through `FromTemplate`"
 (`macros/src/bsn/parse.rs:109-112`, consumed by SPEC-4 as pcwalton's `is_template` flag,
 `dynamic_bsn.rs:1010-1033`). `@` names a `SceneComponent`; the grammar accepts it, but
@@ -1575,7 +1601,7 @@ argument in the path and that `>>`-style nesting needs no special lexing.
 ### 12.8 Multi-root document, parentheses, comments, non-finite floats, all literal forms
 
 ```bsn
-// Two roots. The first is parenthesised, the second is flat.
+// Two roots. The first is parenthesized, the second is flat.
 (
     #Left
     my_game::Link { other: #Right }
@@ -1591,7 +1617,8 @@ my_game::Sensor {
     fallback: NaN,
 }
 ```
-```
+
+```text
 Entity#0 name="Left" base=-
   Patch#1 patch `my_game::Link` value=$0
 Entity#2 name="Right" base=-
@@ -1618,6 +1645,7 @@ $8 Int(255)
 $9 Str("raw \"quoted\" text")
 $10 Float(NaN)
 ```
+
 `roots == [BsnNodeId(0), BsnNodeId(2)]`. Sibling roots share one name scope, mirroring
 `bsn_list!` (`crates/bevy_scene/src/lib.rs:225-236`), so the mutual `#Left`/`#Right`
 references are valid — SPEC-4 enforces that.
@@ -1630,7 +1658,7 @@ complete `.bsn` document, and its *expects* column is the exact error kind (mess
 
 Rendered example — `render("A { width }", Some("assets/player.bsn"))`:
 
-```
+```text
 error: Field shorthand (`{ name }`) is not supported in `.bsn` assets, because there are no
 variables to capture. Write `name: <value>` instead.
   --> assets/player.bsn:1:5

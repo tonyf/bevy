@@ -197,7 +197,7 @@ $3 Int(100)
 ";
 
 /// §12.8 Multi-root document, parentheses, comments, non-finite floats, literal forms.
-const CORPUS_8: &str = r##"// Two roots. The first is parenthesised, the second is flat.
+const CORPUS_8: &str = r##"// Two roots. The first is parenthesized, the second is flat.
 (
     #Left
     my_game::Link { other: #Right }
@@ -1765,7 +1765,7 @@ fn walk_depth_guard_is_documented() {
     const { assert!(MAX_WALK_DEPTH > MAX_NESTING_DEPTH) };
 }
 
-/// §8.4 — the edge-case table, each row with its defined behaviour.
+/// §8.4 — the edge-case table, each row with its defined behavior.
 #[test]
 fn parse_edge_cases_table() {
     // `()` is a complete entity with nothing in it.
