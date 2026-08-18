@@ -63,10 +63,16 @@ pub(crate) fn memory_asset_app() -> (App, Dir) {
 /// failure instead of a hang.
 pub(crate) fn run_app_until(app: &mut App, mut predicate: impl FnMut(&mut App) -> bool) {
     const MAX_FRAMES: usize = 10_000;
-    for _ in 0..MAX_FRAMES {
+    for frame in 0..MAX_FRAMES {
         app.update();
         if predicate(app) {
             return;
+        }
+        // After a warmup, yield real time each frame: asset loads run on the IO task pool,
+        // and a hot update loop on a starved CI runner can burn every frame before the
+        // loader thread is ever scheduled.
+        if frame >= 100 {
+            std::thread::sleep(core::time::Duration::from_millis(1));
         }
     }
     panic!("the app never reached the expected state");

@@ -844,8 +844,11 @@ fn base_asset_app(base_source: &'static str) -> App {
 
     let asset_server = app.world().resource::<AssetServer>().clone();
     let handle = asset_server.load::<ScenePatch>("a.bsn");
-    for _ in 0..10_000 {
+    for frame in 0..10_000 {
         app.update();
+        if frame >= 100 {
+            std::thread::sleep(core::time::Duration::from_millis(1));
+        }
         if asset_server.is_loaded(&handle) {
             break;
         }

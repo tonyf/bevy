@@ -49,8 +49,11 @@ fn multi_asset_app(files: &[(&'static str, &'static str)]) -> App {
         .iter()
         .map(|(path, _)| asset_server.load::<ScenePatch>(*path))
         .collect();
-    for _ in 0..10_000 {
+    for frame in 0..10_000 {
         app.update();
+        if frame >= 100 {
+            std::thread::sleep(core::time::Duration::from_millis(1));
+        }
         if handles.iter().all(|h| asset_server.is_loaded(h)) {
             break;
         }

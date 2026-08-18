@@ -366,10 +366,16 @@ fn child_names(app: &App, root: Entity) -> Vec<String> {
 /// show up as a test failure rather than a hang.
 fn run_app_until(app: &mut App, mut predicate: impl FnMut(&mut App) -> bool) {
     const MAX_FRAMES: usize = 10_000;
-    for _ in 0..MAX_FRAMES {
+    for frame in 0..MAX_FRAMES {
         app.update();
         if predicate(app) {
             return;
+        }
+        // After a warmup, yield real time each frame: asset loads run on the IO task pool,
+        // and a hot update loop on a starved CI runner can burn every frame before the
+        // loader thread is ever scheduled.
+        if frame >= 100 {
+            std::thread::sleep(core::time::Duration::from_millis(1));
         }
     }
     panic!("the app never reached the expected state");
@@ -683,6 +689,7 @@ fn failed_load_is_reported_once() {
     // failure is seen — and therefore logged by `report_scene_patch_load_failures` — exactly once.
     for _ in 0..10 {
         app.update();
+        std::thread::sleep(core::time::Duration::from_millis(1));
     }
 
     let observed = observed.0.lock().unwrap();
@@ -1242,6 +1249,7 @@ fn dyn_no_entity_leak_on_failed_load() {
     });
     for _ in 0..10 {
         app.update();
+        std::thread::sleep(core::time::Duration::from_millis(1));
     }
 
     assert!(load_error(&app, &handle).contains("my_game::NotRegistered"));
@@ -1514,6 +1522,7 @@ fn hot_reload_bsn_parse_error_keeps_previous_scene() {
     edit_and_save(&app, &dir, "a.bsn", "Position {\n  x: ,\n}\n");
     for _ in 0..20 {
         app.update();
+        std::thread::sleep(core::time::Duration::from_millis(1));
     }
 
     assert_eq!(app.world().get::<Position>(root).unwrap().x, 1.0);
@@ -1629,6 +1638,7 @@ fn hot_reload_bsn_twice_in_one_frame_applies_once() {
     run_app_until(&mut app, |app| child_names(app, root) == ["C"]);
     for _ in 0..10 {
         app.update();
+        std::thread::sleep(core::time::Duration::from_millis(1));
     }
 
     assert_eq!(

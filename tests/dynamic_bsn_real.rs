@@ -109,8 +109,12 @@ fn spawn_instance(app: &mut App, path: &'static str) -> Entity {
         .spawn(ScenePatchInstance(handle.clone()))
         .id();
 
-    for _ in 0..MAX_FRAMES {
+    for frame in 0..MAX_FRAMES {
         app.update();
+        // Yield real time after a warmup so the IO task pool gets scheduled on slow runners.
+        if frame >= 100 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         if app
             .world()
             .get::<SceneInstanceState>(entity)

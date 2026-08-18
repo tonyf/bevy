@@ -539,7 +539,7 @@ fn is_ident_continue(c: char) -> bool {
 /// A literal token never carries a sign — `-1` lexes as [`TokenKind::Minus`] followed by
 /// [`TokenKind::Int`] — so this decodes the *magnitude*, and the magnitude of `i128::MIN`
 /// (`2^127`) is one past `i128::MAX`. Decoding the text of a negated `i128::MIN` therefore
-/// reports `NumberOutOfRange` here; the parser negates via [`decode_int_magnitude`] instead,
+/// reports `NumberOutOfRange` here; the parser negates via `decode_int_magnitude` instead,
 /// so `-170141183460469231731687303715884105728` in a source file is accepted.
 pub fn decode_int(source: &str, span: Span) -> Result<i128, BsnParseError> {
     let magnitude = decode_int_magnitude(source, span)?;
