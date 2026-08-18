@@ -1839,3 +1839,162 @@ fn parse_edge_cases_table() {
     assert!(matches!(document.values[1].value, BsnValue::Tuple(_)));
     assert_eq!(print_document(&document), "A((1,))\n");
 }
+
+// --- Mutation-audit tests -----------------------------------------------------------------
+//
+// Each test below kills mutants that survived the cargo-mutants audit: code that was
+// *executed* by the suite but whose result was never *asserted* strongly enough to notice a
+// wrong answer. See dev-docs/dynamic-bsn-testing-audit.md.
+
+/// Finds the first `Patch` node of a parsed document (node 0 is always the root entity).
+fn first_patch(document: &BsnDocument) -> (&BsnPath, &BsnPatchPrefix) {
+    document
+        .nodes
+        .iter()
+        .find_map(|node| match &node.kind {
+            BsnNodeKind::Patch { symbol, prefix, .. } => Some((symbol, prefix)),
+            _ => None,
+        })
+        .expect("document should contain a patch")
+}
+
+/// `true`/`false` must parse as boolean values, not as (rejected lowercase) paths.
+#[test]
+fn bool_literals_parse_as_bools() {
+    let document = parse("A(true, false)").unwrap();
+    assert!(matches!(document.values[1].value, BsnValue::Bool(true)));
+    assert!(matches!(document.values[2].value, BsnValue::Bool(false)));
+}
+
+/// `BsnPath` accessors, asserted directly (their in-crate uses never checked the results).
+#[test]
+fn path_accessors_report_exact_results() {
+    let document = parse("a::b::C { x: 1 }").unwrap();
+    let (symbol, prefix) = first_patch(&document);
+    assert_eq!(symbol.to_type_path(), "a::b::C");
+    assert_eq!(symbol.parent_type_path().as_deref(), Some("a::b"));
+    assert!(!symbol.is_single_segment());
+    assert!(!prefix.is_template());
+
+    let single = parse("C").unwrap();
+    let (s, _) = first_patch(&single);
+    assert_eq!(s.parent_type_path(), None);
+    assert!(s.is_single_segment());
+
+    let two = parse("a::B").unwrap();
+    let (s2, _) = first_patch(&two);
+    assert_eq!(s2.parent_type_path().as_deref(), Some("a"));
+
+    let template = parse("~T(1)").unwrap();
+    let (_, p) = first_patch(&template);
+    assert!(p.is_template());
+}
+
+/// Every clause of `BsnPath::structural_eq` is load-bearing: paths differing in exactly one
+/// dimension are unequal, and spans are ignored.
+#[test]
+fn path_structural_eq_distinguishes_each_clause() {
+    let path = |source: &str| -> BsnPath {
+        let document = parse(source).unwrap();
+        first_patch(&document).0.clone()
+    };
+    let base = path("a::B<C>");
+    assert!(base.structural_eq(&path("a::B<C>")));
+    assert!(base.structural_eq(&path("  a::B<C>"))); // span differs, still equal
+    assert!(!base.structural_eq(&path("a::B<C, D>"))); // generics len
+    assert!(!base.structural_eq(&path("a::B<D>"))); // generic ident
+    assert!(!base.structural_eq(&path("a::X<C>"))); // ident
+    assert!(!base.structural_eq(&path("B<C>"))); // segment count
+}
+
+/// The rendered `expected …` suffix, exact text for every list shape (also pins
+/// `token_desc`'s human-readable names).
+#[test]
+fn expected_suffix_renders_exact_text() {
+    let none = parse("A { x: }").unwrap_err();
+    let one_or_more = parse("A {").unwrap_err();
+    assert!(!one_or_more.expected.is_empty());
+    assert!(one_or_more.expected_suffix().starts_with(" expected "));
+    // Exact suffix for a known two-alternative site: a struct body after a field value
+    // (`5` is a valid token in an invalid position, so the parser reports alternatives).
+    let error = parse("A { x: 1 5").unwrap_err();
+    assert_eq!(error.expected_suffix(), " expected `,` or `}`");
+    let _ = none;
+}
+
+/// `Span::is_none` is a real predicate, not a constant.
+#[test]
+fn span_is_none_is_exact() {
+    assert!(Span::NONE.is_none());
+    assert!(!Span::new(0, 1).is_none());
+}
+
+/// Unicode escape validation boundaries: the largest scalar passes, one past it and
+/// seven-digit forms fail, and surrogate-range values fail via `char::from_u32`.
+#[test]
+fn unicode_escape_boundaries() {
+    assert!(parse(r#"A("\u{10FFFF}")"#).is_ok());
+    assert!(parse(r#"A("\u{110000}")"#).is_err());
+    assert!(parse(r#"A("\u{0010FFFF}")"#).is_err()); // 8 digits
+    assert!(parse(r#"A("\u{D800}")"#).is_err()); // surrogate
+    assert!(parse(r#"A("\x7F")"#).is_ok());
+    assert!(parse(r#"A("\x80")"#).is_err());
+    // The decoded value must be the right character, not merely accepted.
+    let document = parse(r#"A("\u{1F600}")"#).unwrap();
+    let BsnValue::String(text) = &document.values[1].value else {
+        panic!("expected a string");
+    };
+    assert_eq!(text, "\u{1F600}");
+}
+
+/// A multi-segment path value's span covers the whole path (the span-merge arm in
+/// `parse_path_inner`).
+#[test]
+fn path_value_span_covers_all_segments() {
+    let source = "A { x: some::path::C }";
+    let document = parse(source).unwrap();
+    let BsnValue::Path(path) = &document.values[1].value else {
+        panic!("expected a path value");
+    };
+    assert_eq!(path.span.text(source), "some::path::C");
+}
+
+/// Angle-bracket depth in the grouping-vs-tuple scan: a comma inside generics does not make
+/// a tuple; a comma after a generic path does; nested closers unwind correctly.
+#[test]
+fn grouping_scan_tracks_generic_and_bracket_depth() {
+    let tuple = parse("A { x: (p::Q<R, S>, 1) }").unwrap();
+    let BsnValue::Tuple(items) = &tuple.values[1].value else {
+        panic!("expected a tuple");
+    };
+    assert_eq!(items.len(), 2);
+
+    let grouped = parse("A { x: (p::Q<R, S>) }").unwrap();
+    assert!(
+        matches!(&grouped.values[1].value, BsnValue::Path(_)),
+        "grouping parens around a generic path stay a grouping"
+    );
+
+    let nested = parse("A { x: ((1, 2)) }").unwrap();
+    let BsnValue::Tuple(inner) = &nested.values[1].value else {
+        panic!("nested closers must unwind: the outer parens are a grouping");
+    };
+    assert_eq!(inner.len(), 2);
+
+    // Closers must unwind depth during the scan: the comma between the two groups is
+    // top-level, so the outer parens are a 2-tuple of groupings.
+    let two_groups = parse("A { x: ((1), (2)) }").unwrap();
+    let BsnValue::Tuple(outer) = &two_groups.values[1].value else {
+        panic!("expected a 2-tuple of grouped values");
+    };
+    assert_eq!(outer.len(), 2);
+}
+
+/// `token_desc` supplies the human-readable name in "unexpected …" diagnostics.
+#[test]
+fn unexpected_token_names_the_token() {
+    let error = parse("A { x: 1 5").unwrap_err();
+    assert_eq!(error.to_string(), "unexpected number");
+    let error = parse("A { x: ! }").unwrap_err();
+    assert!(!error.to_string().trim_end().ends_with("unexpected"));
+}

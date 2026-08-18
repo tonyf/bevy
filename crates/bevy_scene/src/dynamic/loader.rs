@@ -498,4 +498,12 @@ mod tests {
         let other = AssetPath::from("b.bsn").into_owned();
         assert!(check_no_self_include(&document, source, "b.bsn", &other).is_ok());
     }
+
+    /// The hand-written `Debug` impl names the type (it exists because `AppTypeRegistry`
+    /// is not `Debug`).
+    #[test]
+    fn loader_debug_names_the_type() {
+        let loader = DynamicBsnLoader::new(AppTypeRegistry::default());
+        assert!(format!("{loader:?}").contains("DynamicBsnLoader"));
+    }
 }

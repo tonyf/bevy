@@ -1315,4 +1315,74 @@ mod tests {
             Err(DynamicSceneBuildError::MalformedDocument { .. })
         ));
     }
+
+    /// Builds a linear `Children` chain exactly `depth` entities deep (root = depth 1).
+    fn chain_document(depth: u32) -> BsnDocument {
+        let mut document = BsnDocument::new();
+        let mut child: Option<BsnNodeId> = None;
+        for _ in 0..depth {
+            let relations = match child {
+                Some(child) => vec![document.push_node(BsnNodeKind::Relation {
+                    target_symbol: BsnPath::from_segments(["Children"]),
+                    entities: vec![child],
+                })],
+                None => Vec::new(),
+            };
+            child = Some(document.push_node(BsnNodeKind::Entity {
+                name: None,
+                name_span: None,
+                base: None,
+                base_span: None,
+                patches: Vec::new(),
+                relations,
+            }));
+        }
+        document.push_root(child.unwrap());
+        document
+    }
+
+    /// The depth guard is exact: `MAX_DEPTH` builds, one more errors — and `exit` really
+    /// unwinds, so unbounded *width* at shallow depth never trips the guard.
+    #[test]
+    fn depth_guard_boundary_is_exact() {
+        let app = test_app();
+        let registry = app.world().resource::<AppTypeRegistry>().clone();
+
+        assert!(
+            DynamicScene::from_document(&chain_document(MAX_DEPTH), "test.bsn", &registry).is_ok()
+        );
+        assert!(matches!(
+            DynamicScene::from_document(&chain_document(MAX_DEPTH + 1), "test.bsn", &registry),
+            Err(DynamicSceneBuildError::MalformedDocument { .. })
+        ));
+
+        // 200 siblings at depth 2: only `exit` decrementing per child keeps this legal.
+        let mut document = BsnDocument::new();
+        let children: Vec<BsnNodeId> = (0..200)
+            .map(|_| {
+                document.push_node(BsnNodeKind::Entity {
+                    name: None,
+                    name_span: None,
+                    base: None,
+                    base_span: None,
+                    patches: Vec::new(),
+                    relations: Vec::new(),
+                })
+            })
+            .collect();
+        let relation = document.push_node(BsnNodeKind::Relation {
+            target_symbol: BsnPath::from_segments(["Children"]),
+            entities: children,
+        });
+        let root = document.push_node(BsnNodeKind::Entity {
+            name: None,
+            name_span: None,
+            base: None,
+            base_span: None,
+            patches: Vec::new(),
+            relations: vec![relation],
+        });
+        document.push_root(root);
+        assert!(DynamicScene::from_document(&document, "test.bsn", &registry).is_ok());
+    }
 }
