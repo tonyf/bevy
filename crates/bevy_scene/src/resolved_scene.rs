@@ -331,10 +331,14 @@ impl ResolvedScene {
                     .apply_templates_without_bundle_write(
                         context,
                         &mut bundle_writer,
-                        // this will skip building / inserting templates that
-                        // have local copies in the current scene
-                        // (cached templates are copy-on-write)()
-                        &cached.duplicate_templates,
+                        // Skip any template that has a local slot in the current scene:
+                        // cached templates are copy-on-write, and locally-present types
+                        // shadow the cached ones. Keying on the local slot map (rather than
+                        // bookkeeping recorded at resolve time) also covers a dependent that
+                        // resolved while its base was still unresolved — its local templates
+                        // were created without base knowledge, and applying the base's copy
+                        // too would push the same component twice into one bundle write.
+                        &self.template_indices,
                     )
                     .map_err(|e| ApplySceneError::CachedSceneApplyError {
                         cached: cached.handle.path().cloned(),
@@ -589,32 +593,23 @@ impl ResolvedScene {
         type_id: TypeId,
         default: impl FnOnce() -> Box<dyn ErasedComponentTemplate>,
     ) -> usize {
-        let mut is_cached = false;
-        let index = *self.template_indices.entry(type_id).or_insert_with(|| {
+        *self.template_indices.entry(type_id).or_insert_with(|| {
             let index = self.component_templates.len();
+            // Copy-on-write: seed the local slot from the cached scene's template when one
+            // exists. Apply-time shadowing keys on `template_indices` itself, so no extra
+            // bookkeeping is needed here.
             let value = if let Some(cached_patch) = &mut context.cached
                 && let Some(resolved_cached) = &cached_patch.resolved
                 && let Some(cached_template) =
                     resolved_cached.scene.get_direct_erased_template(type_id)
             {
-                is_cached = true;
                 cached_template.clone_template()
             } else {
                 default()
             };
             self.component_templates.push(value);
             index
-        });
-
-        if is_cached {
-            self.cached
-                .as_mut()
-                .unwrap()
-                .duplicate_templates
-                .insert(type_id);
-        }
-
-        index
+        })
     }
 
     /// Returns the [`ErasedComponentTemplate`] for the given `type_id`, if it exists in this [`ResolvedScene`]. This ignores cached scenes.
@@ -705,10 +700,7 @@ impl ResolvedScene {
                 path: handle.path().cloned(),
             });
         }
-        self.cached = Some(CachedSceneInfo {
-            handle,
-            duplicate_templates: HashSet::default(),
-        });
+        self.cached = Some(CachedSceneInfo { handle });
         Ok(())
     }
 }
@@ -718,10 +710,6 @@ impl ResolvedScene {
 pub(crate) struct CachedSceneInfo {
     /// The handle of the cached scene.
     pub(crate) handle: Handle<ScenePatch>,
-    /// Template types that occur in _both_ the current scene and its cached scene.
-    /// This is used to skip insertion of these types when applying the cached
-    /// resolved scene.
-    pub(crate) duplicate_templates: HashSet<TypeId>,
 }
 
 /// The error returned by [`ResolvedScene::include_cached`].
@@ -1083,6 +1071,13 @@ impl<T: Template<Output: Bundle> + Send + Sync + 'static> ErasedBundleTemplate f
 trait SkipTemplate {
     /// Returns true if the template with `type_id` should be skipped.
     fn should_skip(&self, type_id: TypeId) -> bool;
+}
+
+impl SkipTemplate for &TypeIdHashMap<usize> {
+    #[inline]
+    fn should_skip(&self, type_id: TypeId) -> bool {
+        self.contains_key(&type_id)
+    }
 }
 
 impl SkipTemplate for &HashSet<TypeId> {

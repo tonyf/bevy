@@ -106,8 +106,10 @@ pub(crate) struct DynamicPatch {
     pub(crate) reflect_component: ReflectComponent,
     /// Present iff the template's output type differs from the template type.
     pub(crate) reflect_template: Option<ReflectTemplate>,
-    /// Used by the fallback ladder in [`ErasedComponentTemplate::clone_template`]
-    /// (implemented by [`DynamicComponentTemplate`](crate::DynamicComponentTemplate)).
+    /// Used by the fallback ladder in [`clone_template`], implemented for the dynamic path by
+    /// [`DynamicComponentTemplate`].
+    ///
+    /// [`clone_template`]: crate::ErasedComponentTemplate::clone_template
     pub(crate) reflect_from_reflect: Option<ReflectFromReflect>,
 
     /// What to do to the template value at resolve time.

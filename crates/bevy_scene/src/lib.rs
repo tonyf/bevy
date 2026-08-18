@@ -3237,8 +3237,8 @@ mod tests {
                 .spawn_scene((
                     bsn! { :"dynamic_base.fakescene" },
                     SceneFunction(|context: &mut ResolveContext, scene: &mut ResolvedScene| {
-                        // Triggers the copy-on-write clone of the cached dynamic template, which
-                        // records it in `duplicate_templates`.
+                        // Triggers the copy-on-write clone of the cached dynamic template into
+                        // a local slot, which shadows the cached copy at apply time.
                         scene.get_or_insert_erased_template(
                             context,
                             TypeId::of::<Marker>(),

@@ -16,12 +16,36 @@ use bevy_asset::{
     },
     AssetApp, AssetPlugin,
 };
+use bevy_ecs::{
+    hierarchy::{ChildOf, Children},
+    name::Name,
+    reflect::AppTypeRegistry,
+};
 
 use crate::ScenePlugin;
 
 /// The plugins every test app needs: a task pool to run load tasks on, the asset server, and the
 /// scene systems themselves.
+///
+/// The type registry is replaced with an **empty** one before the plugins run, so the tests see
+/// exactly the types they register — and nothing else. Without this, builds where
+/// `reflect_auto_register` ends up enabled by feature unification (a `--workspace` test run
+/// unifies against the root `bevy` crate's defaults) auto-register every `#[derive(Reflect)]`
+/// fixture in this test binary; the same-named fixtures declared by different test modules
+/// (`Position`, `Marker`, …) then make every short-type-path lookup ambiguous, and 28 tests fail
+/// on CI while passing in a `-p bevy_scene` run. Tests must not depend on which features the
+/// build happened to unify.
 fn add_scene_plugins(app: &mut App) {
+    app.insert_resource(AppTypeRegistry::default());
+    {
+        // The handful of real engine types the suites rely on; everything else is registered by
+        // each suite's own fixture-registration helper.
+        let registry = app.world().resource::<AppTypeRegistry>();
+        let mut registry = registry.write();
+        registry.register::<Name>();
+        registry.register::<Children>();
+        registry.register::<ChildOf>();
+    }
     app.add_plugins((
         TaskPoolPlugin::default(),
         AssetPlugin::default(),
