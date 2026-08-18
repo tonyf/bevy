@@ -999,6 +999,11 @@ impl Plugin for ScenePlugin {
             SpawnScene,
             report_scene_patch_load_failures
                 .in_set(SceneSpawnerSystems::SceneSpawn)
+                // The `after` edge mirrors the one on `(resolve_scene_patches, spawn_queued)`
+                // above: membership in the `SceneSpawn` set does not order this system against
+                // `WorldInstanceSpawn`'s exclusive spawner, and leaving it unordered is a
+                // schedule ambiguity (caught by the `ambiguity_detection` CI example).
+                .after(SceneSpawnerSystems::WorldInstanceSpawn)
                 .before(resolve_scene_patches),
         );
     }
