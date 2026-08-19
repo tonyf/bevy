@@ -1106,7 +1106,7 @@ mod tests {
     use super::{EntityCommandsSceneExt, EntityWorldMutSceneExt, WorldSceneExt};
     use crate::test_support::{memory_asset_app, run_app_until, test_app};
     use crate::{
-        self as bevy_scene, bsn, Scene, SceneInstanceState, ScenePatch, ScenePatchInstance,
+        self as bevy_scene, bsn, Ready, Scene, SceneInstanceState, ScenePatch, ScenePatchInstance,
     };
     use alloc::sync::Arc;
     use bevy_app::{App, Last};
@@ -1342,6 +1342,33 @@ mod tests {
         run_app_until(&mut app, |app| {
             app.world().get::<Position>(root).unwrap().x == 5.
         });
+    }
+
+    /// [`Ready`] fires per *application* of a scene: the initial spawn emits one bottom-up
+    /// pass, and a hot reload emits a fresh pass over the regenerated hierarchy.
+    #[test]
+    fn hot_reload_refires_ready_for_regenerated_entities() {
+        let scenes = FakeScenes::default();
+        scenes.write("a.fakescene", || bsn! { Children [ #A ] });
+        let mut app = hot_reload_app(&scenes, &["a.fakescene"]);
+
+        let ready = Arc::new(Mutex::new(Vec::new()));
+        let tracker = ready.clone();
+        app.add_observer(move |on: On<Ready>| tracker.lock().unwrap().push(on.entity));
+
+        let handle = load_and_settle(&mut app, "a.fakescene");
+        let root = app.world_mut().spawn(ScenePatchInstance(handle)).id();
+        run_app_until(&mut app, |app| child_names(app, root) == ["A"]);
+
+        let child = app.world().get::<Children>(root).unwrap()[0];
+        assert_eq!(core::mem::take(&mut *ready.lock().unwrap()), [child, root]);
+
+        scenes.write("a.fakescene", || bsn! { Children [ #B ] });
+        reload(&app, "a.fakescene");
+        run_app_until(&mut app, |app| child_names(app, root) == ["B"]);
+
+        let new_child = app.world().get::<Children>(root).unwrap()[0];
+        assert_eq!(*ready.lock().unwrap(), [new_child, root]);
     }
 
     #[test]
