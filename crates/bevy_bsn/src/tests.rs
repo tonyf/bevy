@@ -1844,7 +1844,7 @@ fn parse_edge_cases_table() {
 //
 // Each test below kills mutants that survived the cargo-mutants audit: code that was
 // *executed* by the suite but whose result was never *asserted* strongly enough to notice a
-// wrong answer. See dev-docs/dynamic-bsn-testing-audit.md.
+// wrong answer.
 
 /// Finds the first `Patch` node of a parsed document (node 0 is always the root entity).
 fn first_patch(document: &BsnDocument) -> (&BsnPath, &BsnPatchPrefix) {
