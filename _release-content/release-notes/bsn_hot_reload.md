@@ -18,7 +18,9 @@ half, and the bookkeeping that makes it correct.
 
 Reloading is a rebuild, not a reconciliation: the scene's descendants are despawned and respawned,
 so runtime state on scene-spawned entities — and `Entity` ids held elsewhere — does not survive a
-reload. Despawning first is what stops the previous generation of children from being left behind
+reload. `Ready` fires per application, so each reload emits a fresh bottom-up `Ready` pass over
+the regenerated hierarchy — observers doing per-spawn setup run again, which is usually exactly
+what a rebuilt scene wants. Despawning first is what stops the previous generation of children from being left behind
 as parentless ghosts. State-preserving reconciliation is planned as follow-up work. Components that
 a `.bsn` file *stops* declaring are also not removed from the live root entity; respawn the
 instance to pick that up.

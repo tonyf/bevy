@@ -10,7 +10,7 @@ targets. It reads `.bsn` text into a plain data AST and writes that AST back out
 `.bsn` text, so external tooling — exporters, importers, editors, language servers — can
 round-trip scene files without linking a game engine.
 
-Bevy's own `bevy_scene` crate is the reference consumer: it resolves this AST against
+Bevy's own `bevy_bsn_asset` crate is the reference consumer: it resolves this AST against
 `bevy_reflect`'s type registry to spawn entities. Nothing in this crate assumes that consumer;
 the AST refers to types only by *type path string*, and what those strings mean is entirely up
 to whoever resolves them.
