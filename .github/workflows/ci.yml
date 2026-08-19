@@ -131,6 +131,13 @@ jobs:
           # https://github.com/rust-lang/miri#miri--z-flags-and-environment-variables
           # -Zmiri-disable-isolation is needed because our executor uses `fastrand` which accesses system time.
           MIRIFLAGS: -Zmiri-disable-isolation
+      - name: Miri bevy_scene unsafe paths
+        # The `unsafe_paths` module is written Miri-first: bare `World`, no assets, no
+        # task pools, so this filtered run stays cheap.
+        run: cargo miri test -p bevy_scene --no-default-features --lib unsafe_paths
+        env:
+          RUSTFLAGS: -Zrandomize-layout
+          MIRIFLAGS: -Zmiri-disable-isolation
 
   check-compiles:
     runs-on: ubuntu-latest
@@ -198,6 +205,8 @@ jobs:
       # and be able to reuse the prior build.
       - name: Check Compile with --features=web
         run: cargo check -p bevy --no-default-features --features default_no_std,web --target x86_64-unknown-none
+      - name: Check bevy_bsn compiles without std
+        run: cargo check -p bevy_bsn --no-default-features --target x86_64-unknown-none
 
   check-compiles-no-std-portable-atomic:
     runs-on: ubuntu-latest
