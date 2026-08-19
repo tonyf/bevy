@@ -21,15 +21,13 @@ use bevy_reflect::{
 use thiserror::Error;
 
 use crate::{
-    dynamic::{
-        scene::{
-            DynamicName, DynamicPatch, DynamicPatchValue, DynamicRelation, DynamicScene,
-            DynamicSceneEntity, DynamicSceneInner,
-        },
-        value::{self, EnumInput},
+    scene::{
+        DynamicName, DynamicPatch, DynamicPatchValue, DynamicRelation, DynamicScene,
+        DynamicSceneEntity, DynamicSceneInner,
     },
-    ScenePatch,
+    value::{self, EnumInput},
 };
+use bevy_scene::ScenePatch;
 
 /// The deepest entity/value nesting the builder will walk.
 ///
@@ -332,7 +330,7 @@ impl<'a> BuildCx<'a> {
 }
 
 impl DynamicScene {
-    /// Lowers a parsed `.bsn` document into a resolvable [`Scene`](crate::Scene).
+    /// Lowers a parsed `.bsn` document into a resolvable [`Scene`](bevy_scene::Scene).
     ///
     /// `source` is the asset path the document was parsed from; it is used for error messages and
     /// as the identity of the document's `#Name` entity references, so two spawns of the same
@@ -730,7 +728,7 @@ mod tests {
     use bevy_bsn::{BsnNodeKind, BsnValue};
 
     use super::*;
-    use crate::dynamic::{
+    use crate::{
         scene::DynamicPatchValue,
         tests::{doc, test_app, Choice, Marker, Position, Sprite, SpriteTemplate},
     };
@@ -1116,8 +1114,8 @@ mod tests {
         assert_eq!(dependencies.len(), 1);
         assert_eq!(dependencies[0].1.path().to_string_lossy(), "child.bsn");
 
-        let mut registered = crate::SceneDependencies::default();
-        crate::Scene::register_dependencies(&scene, &mut registered);
+        let mut registered = bevy_scene::SceneDependencies::default();
+        bevy_scene::Scene::register_dependencies(&scene, &mut registered);
         let paths: Vec<_> = registered
             .iter()
             .map(|dependency| dependency.path.path().to_string_lossy().to_string())

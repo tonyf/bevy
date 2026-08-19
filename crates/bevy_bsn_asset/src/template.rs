@@ -11,12 +11,12 @@ use bevy_ecs::{
 };
 use bevy_reflect::{std_traits::ReflectDefault, PartialReflect, Reflect, ReflectFromReflect};
 
-use crate::ErasedComponentTemplate;
+use bevy_scene::ErasedComponentTemplate;
 
 /// An [`ErasedComponentTemplate`] whose template value is held reflectively.
 ///
 /// This is what a `.bsn` document's `Type { … }` entry becomes in a
-/// [`ResolvedScene`](crate::ResolvedScene). It stores a **concrete** value of the component's
+/// [`ResolvedScene`](bevy_scene::ResolvedScene). It stores a **concrete** value of the component's
 /// template type (never a `Dynamic*` value), plus the type data needed to build and insert the
 /// component without touching the [`TypeRegistry`](bevy_reflect::TypeRegistry) again.
 ///
@@ -44,7 +44,7 @@ pub struct DynamicComponentTemplate {
     /// A live registry handle.
     ///
     /// This is *not* made redundant by `ResolveContext::type_registry`: that only exists during
-    /// [`Scene::resolve`](crate::Scene::resolve), whereas
+    /// [`Scene::resolve`](bevy_scene::Scene::resolve), whereas
     /// [`ErasedComponentTemplate::apply`] runs later and receives a [`TemplateContext`], which has
     /// no registry — yet `push_to_bundle_writer` needs one, and reading it out of the context's
     /// world would hold a borrow of the entity across the `world_mut()` call in `apply`.
@@ -185,10 +185,8 @@ mod tests {
     use bevy_reflect::{tuple_struct::DynamicTupleStruct, TypePath, TypeRegistration};
 
     use super::*;
-    use crate::{
-        dynamic::tests::{test_app, Image, Position, Skipped, Sprite, SpriteTemplate, Unreflected},
-        ResolveContext, ResolvedScene, ResolvedSceneRoot, ScenePatch,
-    };
+    use crate::tests::{test_app, Image, Position, Skipped, Sprite, SpriteTemplate, Unreflected};
+    use bevy_scene::{ResolveContext, ResolvedScene, ResolvedSceneRoot, ScenePatch};
 
     /// Builds a `DynamicComponentTemplate` for `T`, whose output type is `Output`.
     fn template_for<T: 'static, Output: 'static>(
@@ -265,9 +263,8 @@ mod tests {
         let mut app = test_app();
         let registry = app.world().resource::<AppTypeRegistry>().clone();
         let position = template_for::<Position, Position>(&registry);
-        let marker =
-            template_for::<crate::dynamic::tests::Marker, crate::dynamic::tests::Marker>(&registry);
-        let bar = template_for::<crate::dynamic::tests::Bar, crate::dynamic::tests::Bar>(&registry);
+        let marker = template_for::<crate::tests::Marker, crate::tests::Marker>(&registry);
+        let bar = template_for::<crate::tests::Bar, crate::tests::Bar>(&registry);
 
         let world = app.world_mut();
         // Warm up the empty archetype so that the delta only counts archetypes the spawn creates.
@@ -277,11 +274,8 @@ mod tests {
             world,
             vec![
                 (TypeId::of::<Position>(), Box::new(position)),
-                (
-                    TypeId::of::<crate::dynamic::tests::Marker>(),
-                    Box::new(marker),
-                ),
-                (TypeId::of::<crate::dynamic::tests::Bar>(), Box::new(bar)),
+                (TypeId::of::<crate::tests::Marker>(), Box::new(marker)),
+                (TypeId::of::<crate::tests::Bar>(), Box::new(bar)),
             ],
         );
         let after = world.archetypes().len();
@@ -384,7 +378,7 @@ mod tests {
         // A slot filed under `Position`'s id but holding a template of an unregistered,
         // non-reflectable type cannot be patched — and must produce an error, not a panic.
         let mut app = test_app();
-        let scene = crate::dynamic::tests::scene(&app, "a.bsn", "Position { x: 1.0 }");
+        let scene = crate::tests::scene(&app, "a.bsn", "Position { x: 1.0 }");
 
         let world = app.world_mut();
         let assets = world.resource::<AssetServer>().clone();
@@ -400,9 +394,12 @@ mod tests {
         let mut resolved = ResolvedScene::default();
         resolved.insert_erased_template(TypeId::of::<Position>(), Box::new(Unreflected(1)));
 
-        let error = crate::Scene::resolve(scene, &mut context, &mut resolved).unwrap_err();
+        let error = bevy_scene::Scene::resolve(scene, &mut context, &mut resolved).unwrap_err();
         assert!(
-            matches!(error, crate::ResolveSceneError::UnpatchableTemplate { .. }),
+            matches!(
+                error,
+                bevy_scene::ResolveSceneError::UnpatchableTemplate { .. }
+            ),
             "unexpected error: {error}"
         );
     }

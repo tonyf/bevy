@@ -86,6 +86,7 @@ fn test_app(source: Option<Dir>) -> App {
         AssetPlugin::default(),
         ImagePlugin::default(),
         ScenePlugin,
+        BsnAssetPlugin,
     ));
     app.register_asset_loader(ImageLoader::new(CompressedImageFormats::empty()));
     app.finish();

@@ -573,6 +573,7 @@ fn bench_app(before: impl FnOnce(&mut App), after: impl FnOnce(&mut App)) -> App
         bevy_app::TaskPoolPlugin::default(),
         bevy_asset::AssetPlugin::default(),
         bevy_scene::ScenePlugin,
+        bevy_bsn_asset::BsnAssetPlugin,
     ));
     after(&mut app);
     app.finish();

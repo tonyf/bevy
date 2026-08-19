@@ -51,6 +51,7 @@ use bevy_asset::{
     AssetApp, AssetPlugin,
 };
 use bevy_bsn::{parse, print_document, BsnDocument};
+use bevy_bsn_asset::{BsnAssetPlugin, DynamicScene};
 use bevy_ecs::{
     entity::Entity,
     hierarchy::{ChildOf, Children},
@@ -62,7 +63,7 @@ use bevy_ecs::{
 };
 use bevy_platform::collections::HashMap;
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
-use bevy_scene::{DynamicScene, ScenePlugin, WorldSceneExt};
+use bevy_scene::{ScenePlugin, WorldSceneExt};
 use proptest::{
     prelude::*,
     test_runner::{Config, RngAlgorithm, TestCaseError, TestCaseResult, TestRng, TestRunner},
@@ -184,6 +185,7 @@ fn test_app() -> App {
         TaskPoolPlugin::default(),
         AssetPlugin::default(),
         ScenePlugin,
+        BsnAssetPlugin,
     ));
     app.register_type::<Position>();
     app.register_type::<Opts>();

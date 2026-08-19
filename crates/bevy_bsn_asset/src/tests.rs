@@ -21,10 +21,8 @@ use bevy_ecs::{
 use bevy_reflect::{std_traits::ReflectDefault, Reflect, TypeRegistry};
 use core::any::TypeId;
 
-use crate::{
-    self as bevy_scene, bsn, test_support::memory_asset_app, DynamicScene, ResolvedSceneRoot,
-    Scene, ScenePatch, WorldSceneExt,
-};
+use crate::{test_support::memory_asset_app, DynamicScene};
+use bevy_scene::{bsn, ResolvedSceneRoot, Scene, ScenePatch, WorldSceneExt};
 
 // ---------------------------------------------------------------------------------------
 // Fixture types

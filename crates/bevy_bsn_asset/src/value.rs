@@ -27,7 +27,7 @@ use bevy_reflect::{
     PartialReflect, Reflect, TypeInfo, TypeRegistration, TypeRegistry,
 };
 
-use crate::dynamic::build::{malformed, resolve_symbol, BuildCx, DynamicSceneBuildError};
+use crate::build::{malformed, resolve_symbol, BuildCx, DynamicSceneBuildError};
 
 /// The body that followed a path in the source: for an enum variant, the fields supplied for it.
 #[derive(Clone, Copy)]
@@ -728,7 +728,7 @@ mod tests {
     use bevy_reflect::{Reflect, ReflectRef, TypeRegistration};
 
     use super::*;
-    use crate::dynamic::tests::{
+    use crate::tests::{
         test_registry, Bar, Choice, Collections, FontSize, Foo, Image, Marker, TextFont, Tricky,
     };
 

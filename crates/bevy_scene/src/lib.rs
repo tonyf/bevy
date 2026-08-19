@@ -885,11 +885,12 @@
 //! the file that names them. Each `.bsn` file describes exactly one root entity and cannot
 //! inherit from itself; labeled sub-assets (`file.bsn#Label`) are not supported yet.
 //!
-//! Loading is provided by `DynamicBsnLoader`, registered by [`ScenePlugin`] when the
-//! `bsn_asset` cargo feature is enabled (it is on by default; it is included in the `scene`
-//! feature collection). Parse and resolution failures are reported as asset load errors with
-//! `file:line:column` locations and never panic; a failed scene asset is also logged once by
-//! `report_scene_patch_load_failures`, naming the entities that will never spawn as a result.
+//! Loading is provided by the `bevy_bsn_asset` crate's `DynamicBsnLoader`, registered by its
+//! `BsnAssetPlugin` (included in `DefaultPlugins` when the `bsn_asset` cargo feature is enabled;
+//! it is on by default and included in the `scene` feature collection). Parse and resolution
+//! failures are reported as asset load errors with `file:line:column` locations and never panic;
+//! a failed scene asset is also logged once, naming the entities that will never spawn as a
+//! result.
 //!
 //! The `.bsn` grammar itself — lexer, parser, AST, and printer — lives in the standalone
 //! `bevy_bsn` crate, which depends on no other Bevy crate and builds on `no_std`. Third-party
@@ -951,8 +952,6 @@
 ///
 /// This includes the most common types in this crate, re-exported for your convenience.
 pub mod prelude {
-    #[cfg(feature = "bsn_asset")]
-    pub use crate::DynamicBsnLoader;
     pub use crate::{
         bsn, bsn_list, on, template_value, CommandsSceneExt, EntityCommandsSceneExt,
         EntityWorldMutSceneExt, PatchFromTemplate, PatchTemplate, Scene, SceneComponent,
@@ -966,8 +965,6 @@ pub mod macro_utils;
 
 extern crate alloc;
 
-#[cfg(feature = "bsn_asset")]
-mod dynamic;
 mod resolved_scene;
 mod scene;
 mod scene_component;
@@ -978,8 +975,6 @@ mod spawn_system;
 #[cfg(test)]
 mod test_support;
 
-#[cfg(feature = "bsn_asset")]
-pub use dynamic::*;
 pub use resolved_scene::*;
 pub use scene::*;
 pub use scene_component::*;
@@ -1000,9 +995,9 @@ pub use bevy_scene_macros::SceneComponent;
 
 /// Adds support for spawning Bevy Scenes. See [`Scene`], [`SceneList`], [`ScenePatch`], and the [`bsn!`] macro for more information.
 ///
-/// Requires [`AssetPlugin`](bevy_asset::AssetPlugin) to be added first. When the `bsn_asset`
-/// feature is enabled (it is by default), this plugin also registers `DynamicBsnLoader` and so
-/// additionally requires the `AppTypeRegistry` resource, which is present in every `App::new()`.
+/// Requires [`AssetPlugin`](bevy_asset::AssetPlugin) to be added first. Loading `.bsn` files
+/// additionally requires the `bevy_bsn_asset` crate's `BsnAssetPlugin`, added by
+/// `DefaultPlugins` when the `bsn_asset` cargo feature is enabled (it is by default).
 #[derive(Default)]
 pub struct ScenePlugin;
 
@@ -1031,19 +1026,6 @@ impl Plugin for ScenePlugin {
             registry
                 .register_type_conversion::<String, bevy_ecs::name::HashedStr, _>(|s| Ok(s.into()));
         }
-
-        #[cfg(feature = "bsn_asset")]
-        app.init_asset_loader::<DynamicBsnLoader>().add_systems(
-            SpawnScene,
-            report_scene_patch_load_failures
-                .in_set(SceneSpawnerSystems::SceneSpawn)
-                // The `after` edge mirrors the one on `(resolve_scene_patches, spawn_queued)`
-                // above: membership in the `SceneSpawn` set does not order this system against
-                // `WorldInstanceSpawn`'s exclusive spawner, and leaving it unordered is a
-                // schedule ambiguity (caught by the `ambiguity_detection` CI example).
-                .after(SceneSpawnerSystems::WorldInstanceSpawn)
-                .before(resolve_scene_patches),
-        );
     }
 }
 
@@ -3330,7 +3312,7 @@ mod tests {
         fn resolve_scene_error_messages_name_the_type() {
             let type_path = || "my_crate::Foo".to_string();
             // The remaining `ResolveSceneError` variants are all reported at *build* time by
-            // `DynamicSceneBuildError`, with a source span; see `dynamic::build`.
+            // `DynamicSceneBuildError`, with a source span; see `bevy_bsn_asset`.
             let errors = [
                 ResolveSceneError::ApplyFailed {
                     type_path: type_path(),
@@ -3542,8 +3524,8 @@ mod tests {
             Ok(ScenePatch::load_with(load_context, (self.0)()))
         }
 
-        // A dedicated extension, so that this loader is picked rather than the real
-        // `DynamicBsnLoader` that `ScenePlugin` registers for `.bsn`.
+        // A dedicated extension: `.bsn` belongs to the `bevy_bsn_asset` loader in apps that
+        // register `BsnAssetPlugin`, and these fixtures are not `.bsn` documents.
         fn extensions(&self) -> &[&str] {
             &["fakescene"]
         }

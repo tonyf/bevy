@@ -1,12 +1,8 @@
 //! Harness shared by the crate's `#[cfg(test)]` suites.
 //!
-//! The lib tests in `lib.rs` and `spawn.rs` all need the
-//! same two things: an [`App`] carrying the asset and scene plugins, and a bounded pump that
-//! turns "never reached the expected state" into a failure rather than a hang.
-//!
-//! The integration tests in `tests/` keep their own copies on purpose: sharing this module across
-//! the lib/integration boundary would mean exporting it publicly behind a feature, which is not
-//! worth it for three functions.
+//! A copy of `bevy_scene`'s private test harness (kept private there on purpose), with
+//! [`BsnAssetPlugin`](crate::BsnAssetPlugin) added so `.bsn` files load. The integration tests in
+//! `tests/` keep their own copies, as they do in `bevy_scene`.
 
 use bevy_app::{App, TaskPoolPlugin};
 use bevy_asset::{
@@ -21,20 +17,18 @@ use bevy_ecs::{
     name::Name,
     reflect::AppTypeRegistry,
 };
+use bevy_scene::ScenePlugin;
 
-use crate::ScenePlugin;
-
-/// The plugins every test app needs: a task pool to run load tasks on, the asset server, and the
-/// scene systems themselves.
+/// The plugins every test app needs: a task pool to run load tasks on, the asset server, the
+/// scene systems, and the `.bsn` loader itself.
 ///
 /// The type registry is replaced with an **empty** one before the plugins run, so the tests see
 /// exactly the types they register — and nothing else. Without this, builds where
 /// `reflect_auto_register` ends up enabled by feature unification (a `--workspace` test run
 /// unifies against the root `bevy` crate's defaults) auto-register every `#[derive(Reflect)]`
 /// fixture in this test binary; the same-named fixtures declared by different test modules
-/// (`Position`, `Marker`, …) then make every short-type-path lookup ambiguous, and 28 tests fail
-/// on CI while passing in a `-p bevy_scene` run. Tests must not depend on which features the
-/// build happened to unify.
+/// (`Position`, `Marker`, …) then make every short-type-path lookup ambiguous. Tests must not
+/// depend on which features the build happened to unify.
 fn add_scene_plugins(app: &mut App) {
     app.insert_resource(AppTypeRegistry::default());
     {
@@ -50,6 +44,7 @@ fn add_scene_plugins(app: &mut App) {
         TaskPoolPlugin::default(),
         AssetPlugin::default(),
         ScenePlugin,
+        crate::BsnAssetPlugin,
     ));
 }
 
@@ -79,25 +74,4 @@ pub(crate) fn memory_asset_app() -> (App, Dir) {
     );
     add_scene_plugins(&mut app);
     (app, dir)
-}
-
-/// Pumps `app` until `predicate` holds, or panics.
-///
-/// The bound is what makes the "never loads" and "never reloads" failure modes show up as a test
-/// failure instead of a hang.
-pub(crate) fn run_app_until(app: &mut App, mut predicate: impl FnMut(&mut App) -> bool) {
-    const MAX_FRAMES: usize = 10_000;
-    for frame in 0..MAX_FRAMES {
-        app.update();
-        if predicate(app) {
-            return;
-        }
-        // After a warmup, yield real time each frame: asset loads run on the IO task pool,
-        // and a hot update loop on a starved CI runner can burn every frame before the
-        // loader thread is ever scheduled.
-        if frame >= 100 {
-            std::thread::sleep(core::time::Duration::from_millis(1));
-        }
-    }
-    panic!("the app never reached the expected state");
 }

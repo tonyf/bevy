@@ -1164,7 +1164,7 @@ mod tests {
     // hand-writing `AssetEvent`s, which could not reproduce either the event ordering or the
     // whole-value replacement that the design depends on.
     //
-    // They use a fake loader rather than `DynamicBsnLoader`, so they hold without the `bsn_asset`
+    // They use a fake loader rather than the `.bsn` loader, so they hold without the `bsn_asset`
     // feature and cover third-party `AssetLoader<Asset = ScenePatch>` implementations too. The
     // same scenarios are mirrored with real `.bsn` text in `tests/dynamic_bsn.rs`.
     // ---------------------------------------------------------------------------------------
@@ -1259,8 +1259,8 @@ mod tests {
             Ok(ScenePatch::load_with(load_context, scene))
         }
 
-        /// A dedicated extension, so that this loader is picked rather than the real
-        /// `DynamicBsnLoader` that `ScenePlugin` registers for `.bsn`.
+        /// A dedicated extension: `.bsn` belongs to the `bevy_bsn_asset` loader in apps that
+        /// register `BsnAssetPlugin`, and these fixtures are not `.bsn` documents.
         fn extensions(&self) -> &[&str] {
             &["fakescene"]
         }

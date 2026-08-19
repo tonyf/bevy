@@ -2,7 +2,7 @@
 //! source, loaded through a real `AssetServer` and spawned through the real scene pipeline.
 //!
 //! Everything here exercises the *asset* layer. Document lowering itself is covered by
-//! `bevy_scene`'s unit tests in `src/dynamic/`.
+//! this crate's unit tests in `src/`.
 
 extern crate alloc;
 
@@ -19,6 +19,7 @@ use bevy_asset::{
     },
     Asset, AssetApp, AssetLoadFailedEvent, AssetPlugin, AssetServer, Assets, Handle, LoadState,
 };
+use bevy_bsn_asset::BsnAssetPlugin;
 use bevy_ecs::{
     entity::Entity,
     error::{BevyError, Result},
@@ -288,6 +289,7 @@ fn test_app(dir: &Dir) -> App {
         TaskPoolPlugin::default(),
         AssetPlugin::default(),
         ScenePlugin,
+        BsnAssetPlugin,
     ));
     app.init_asset::<Image>();
     app.register_asset_reflect::<Image>();

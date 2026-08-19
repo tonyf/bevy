@@ -25,17 +25,16 @@ use bevy_ecs::{
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
 
 use crate::{
-    self as bevy_scene, bsn,
-    dynamic::tests::{register_fixtures, scene, test_app, Choice, Foo, Position},
     test_support::memory_asset_app,
-    ScenePatch, WorldSceneExt,
+    tests::{register_fixtures, scene, test_app, Choice, Foo, Position},
 };
+use bevy_scene::{bsn, ScenePatch, WorldSceneExt};
 
 /// An app whose memory asset source contains the given `(path, source)` `.bsn` files, all loaded.
 fn multi_asset_app(files: &[(&'static str, &'static str)]) -> App {
     let (mut app, dir) = memory_asset_app();
-    app.init_asset::<crate::dynamic::tests::Image>();
-    app.register_asset_reflect::<crate::dynamic::tests::Image>();
+    app.init_asset::<crate::tests::Image>();
+    app.register_asset_reflect::<crate::tests::Image>();
     register_fixtures(&mut app);
     app.finish();
     app.cleanup();
@@ -202,7 +201,7 @@ fn widths_app() -> App {
 }
 
 fn try_scene(app: &App, source: &str) -> Result<(), String> {
-    let document = crate::dynamic::tests::doc(source);
+    let document = crate::tests::doc(source);
     let registry = app.world().resource::<AppTypeRegistry>().clone();
     crate::DynamicScene::from_document(&document, "t.bsn", &registry)
         .map(|_| ())
@@ -396,11 +395,7 @@ fn a7_duplicate_names_and_child_only_names() {
     let id = world.spawn_scene(a).unwrap().id();
     let children = world.entity(id).get::<Children>().unwrap().to_vec();
     assert_eq!(children.len(), 2);
-    let reference = world
-        .entity(id)
-        .get::<crate::dynamic::tests::Reference>()
-        .unwrap()
-        .0;
+    let reference = world.entity(id).get::<crate::tests::Reference>().unwrap().0;
     assert_eq!(reference, children[1], "#Deep is the second child");
 }
 
@@ -484,9 +479,7 @@ fn b2_failing_conversion_errors_cleanly() {
     let mut app = test_app();
     app.register_type::<Refusing>()
         .register_type::<HasRefusing>();
-    app.register_type_conversion::<crate::dynamic::tests::TextSize, Refusing, _>(|value| {
-        Err(value)
-    });
+    app.register_type_conversion::<crate::tests::TextSize, Refusing, _>(Err);
     let error = try_scene(&app, "HasRefusing { field: TextSize::Large }")
         .expect_err("a failing conversion must be an error");
     assert!(
@@ -626,19 +619,11 @@ fn b9_same_asset_two_spawns_do_not_alias() {
     let sk = world.entity(second).get::<Children>().unwrap()[0];
     assert_ne!(fk, sk);
     assert_eq!(
-        world
-            .entity(fk)
-            .get::<crate::dynamic::tests::Reference>()
-            .unwrap()
-            .0,
+        world.entity(fk).get::<crate::tests::Reference>().unwrap().0,
         first
     );
     assert_eq!(
-        world
-            .entity(sk)
-            .get::<crate::dynamic::tests::Reference>()
-            .unwrap()
-            .0,
+        world.entity(sk).get::<crate::tests::Reference>().unwrap().0,
         second
     );
 }
@@ -665,7 +650,7 @@ fn b11_tilde_on_a_plain_component() {
 #[derive(Component, bevy_ecs::template::FromTemplate, Reflect, PartialEq, Debug)]
 #[template(reflect)]
 #[reflect(Component, FromTemplate)]
-pub(crate) struct Icon(pub bevy_asset::Handle<crate::dynamic::tests::Image>);
+pub(crate) struct Icon(pub bevy_asset::Handle<crate::tests::Image>);
 
 fn icon_app() -> App {
     let mut app = test_app();
@@ -680,7 +665,7 @@ fn b12_handle_template_static_then_dynamic() {
     let expected = app
         .world()
         .resource::<AssetServer>()
-        .load::<crate::dynamic::tests::Image>("dyn.png");
+        .load::<crate::tests::Image>("dyn.png");
     let dynamic = scene(&app, "a.bsn", r#"Icon("dyn.png")"#);
 
     let world = app.world_mut();
@@ -705,7 +690,7 @@ fn b12b_handle_template_dynamic_then_static() {
     let expected = app
         .world()
         .resource::<AssetServer>()
-        .load::<crate::dynamic::tests::Image>("static.png");
+        .load::<crate::tests::Image>("static.png");
     let dynamic = scene(&app, "a.bsn", r#"Icon("dyn.png")"#);
 
     let world = app.world_mut();
@@ -749,8 +734,8 @@ fn b14_base_is_a_non_scene_asset() {
 /// Like [`multi_asset_app`] but does not require the files to load successfully.
 fn multi_asset_app_lenient(files: &[(&'static str, &'static str)]) -> App {
     let (mut app, dir) = memory_asset_app();
-    app.init_asset::<crate::dynamic::tests::Image>();
-    app.register_asset_reflect::<crate::dynamic::tests::Image>();
+    app.init_asset::<crate::tests::Image>();
+    app.register_asset_reflect::<crate::tests::Image>();
     register_fixtures(&mut app);
     app.finish();
     app.cleanup();
@@ -1009,12 +994,12 @@ fn d7_resolve_without_a_context_registry() {
     use bevy_asset::Assets;
     let mut app = test_app();
     let a = scene(&app, "a.bsn", "Position { x: 1.0 } Foo { y: 2 }");
-    let boxed: Box<dyn crate::Scene> = Box::new(a);
+    let boxed: Box<dyn bevy_scene::Scene> = Box::new(a);
     let world = app.world_mut();
     let assets = world.resource::<AssetServer>().clone();
     let resolved = {
         let patches = world.resource::<Assets<ScenePatch>>();
-        crate::ResolvedSceneRoot::resolve(boxed, &assets, patches, None).unwrap()
+        bevy_scene::ResolvedSceneRoot::resolve(boxed, &assets, patches, None).unwrap()
     };
     let id = resolved.spawn(world).unwrap().id();
     assert_eq!(world.entity(id).get::<Position>().unwrap().x, 1.0);

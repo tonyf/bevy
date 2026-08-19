@@ -21,14 +21,12 @@ use bevy_reflect::TypePath;
 use thiserror::Error;
 use tracing::error;
 
-use crate::{
-    dynamic::{DynamicScene, DynamicSceneBuildError},
-    ScenePatch,
-};
+use crate::{DynamicScene, DynamicSceneBuildError};
+use bevy_scene::ScenePatch;
 
 /// An [`AssetLoader`] for `.bsn` files, producing a [`ScenePatch`].
 ///
-/// Registered automatically by [`ScenePlugin`](crate::ScenePlugin) when the `bsn_asset` cargo
+/// Registered automatically by [`BsnAssetPlugin`](crate::BsnAssetPlugin) when the `bsn_asset` cargo
 /// feature is enabled (it is on by default), so
 /// `asset_server.load::<ScenePatch>("scenes/player.bsn")` works out of the box.
 ///
@@ -36,7 +34,7 @@ use crate::{
 /// (`#[derive(Reflect)]` types are registered automatically when the `reflect_auto_register`
 /// feature is on; otherwise call [`App::register_type`](bevy_app::App)). The registry handle is
 /// cloned from the world when the loader is created, so types registered *after*
-/// [`ScenePlugin`](crate::ScenePlugin) is built are still visible to it.
+/// [`BsnAssetPlugin`](crate::BsnAssetPlugin) is built are still visible to it.
 #[derive(TypePath)]
 pub struct DynamicBsnLoader {
     /// A clone of the app's [`AppTypeRegistry`]. Cloning aliases the same lock, so later
@@ -53,7 +51,7 @@ impl core::fmt::Debug for DynamicBsnLoader {
 impl DynamicBsnLoader {
     /// Creates a loader that resolves `.bsn` type paths against `type_registry`.
     ///
-    /// Prefer letting [`ScenePlugin`](crate::ScenePlugin) register the loader; this constructor
+    /// Prefer letting [`BsnAssetPlugin`](crate::BsnAssetPlugin) register the loader; this constructor
     /// exists for apps that build their schedules by hand.
     pub fn new(type_registry: AppTypeRegistry) -> Self {
         Self { type_registry }
@@ -311,10 +309,10 @@ impl DynamicBsnLoaderError {
 /// resolution diagnostics.
 ///
 /// Without this, a `.bsn` that fails to load is reported once by the asset server and then every
-/// [`ScenePatchInstance`](crate::ScenePatchInstance) pointing at it waits forever with no
+/// [`ScenePatchInstance`](bevy_scene::ScenePatchInstance) pointing at it waits forever with no
 /// indication that *scene spawning* is what broke.
 ///
-/// Added by [`ScenePlugin`](crate::ScenePlugin) when the `bsn_asset` feature is enabled. The
+/// Added by [`BsnAssetPlugin`](crate::BsnAssetPlugin) when the `bsn_asset` feature is enabled. The
 /// [`MessageReader`] cursor means each failure is logged exactly once, not once per frame; a retry
 /// or a hot-reload attempt emits a new event and is logged again, which is intended.
 pub fn report_scene_patch_load_failures(

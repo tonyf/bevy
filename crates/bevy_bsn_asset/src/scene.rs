@@ -11,10 +11,10 @@ use bevy_ecs::{
 };
 use bevy_reflect::{std_traits::ReflectDefault, PartialReflect, ReflectFromReflect, ReflectRef};
 
-use crate::{
-    dynamic::template::DynamicComponentTemplate, erased_template_as_partial_reflect_mut,
-    CachedSceneAsset, NameEntityReference, ResolveContext, ResolveSceneError, ResolvedScene, Scene,
-    SceneDependencies, ScenePatch,
+use crate::template::DynamicComponentTemplate;
+use bevy_scene::{
+    erased_template_as_partial_reflect_mut, CachedSceneAsset, NameEntityReference, ResolveContext,
+    ResolveSceneError, ResolvedScene, Scene, SceneDependencies, ScenePatch,
 };
 
 /// A [`Scene`] built from a parsed `.bsn` document.
@@ -109,7 +109,7 @@ pub(crate) struct DynamicPatch {
     /// Used by the fallback ladder in [`clone_template`], implemented for the dynamic path by
     /// [`DynamicComponentTemplate`].
     ///
-    /// [`clone_template`]: crate::ErasedComponentTemplate::clone_template
+    /// [`clone_template`]: bevy_scene::ErasedComponentTemplate::clone_template
     pub(crate) reflect_from_reflect: Option<ReflectFromReflect>,
 
     /// What to do to the template value at resolve time.
