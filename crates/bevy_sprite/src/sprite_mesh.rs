@@ -1,7 +1,11 @@
 use bevy_asset::{Assets, Handle};
 use bevy_camera::visibility::{Visibility, VisibilityClass};
 use bevy_color::Color;
-use bevy_ecs::{component::Component, reflect::ReflectComponent, template::FromTemplate};
+use bevy_ecs::{
+    component::Component,
+    reflect::{ReflectComponent, ReflectFromTemplate},
+    template::FromTemplate,
+};
 use bevy_image::{Image, TextureAtlas, TextureAtlasLayout};
 use bevy_math::{Rect, UVec2, Vec2};
 use bevy_reflect::{std_traits::ReflectDefault, Reflect};
@@ -15,7 +19,8 @@ use crate::{Anchor, SpriteImageMode};
 /// The only API difference is the added [`alpha mode`](SpriteMesh::alpha_mode).
 #[derive(Component, Debug, Default, Clone, Reflect, PartialEq, FromTemplate)]
 #[require(Transform, Visibility, VisibilityClass, Anchor)]
-#[reflect(Component, Default, Debug, Clone)]
+#[reflect(Component, Default, Debug, Clone, FromTemplate)]
+#[template(reflect)]
 pub struct SpriteMesh {
     /// The image used to render the sprite
     pub image: Handle<Image>,

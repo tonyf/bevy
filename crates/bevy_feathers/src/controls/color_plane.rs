@@ -8,7 +8,7 @@ use bevy_ecs::{
     hierarchy::{ChildOf, Children},
     observer::On,
     query::{Changed, Has, Or, With},
-    reflect::ReflectComponent,
+    reflect::{ReflectComponent, ReflectFromTemplate},
     schedule::IntoScheduleConfigs,
     system::{Commands, Query, Res, ResMut},
     template::FromTemplate,
@@ -51,8 +51,9 @@ use crate::{palette, theme::ThemeBackgroundColor, tokens};
 #[derive(
     SceneComponent, FromTemplate, Debug, Reflect, Copy, PartialEq, Eq, Hash, Default, Clone,
 )]
-#[reflect(Component)]
+#[reflect(Component, FromTemplate)]
 #[require(ColorPlaneDragState)]
+#[template(reflect)]
 pub enum FeathersColorPlane {
     /// Show red on the horizontal axis and green on the vertical.
     RedGreen,

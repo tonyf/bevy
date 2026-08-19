@@ -7,6 +7,7 @@ use bevy_ecs::{
     component::Component,
     lifecycle::HookContext,
     message::MessageReader,
+    reflect::{ReflectComponent, ReflectFromTemplate},
     system::{Res, ResMut},
     template::FromTemplate,
     world::DeferredWorld,
@@ -15,7 +16,7 @@ use bevy_image::Image;
 use bevy_math::curve::{FunctionCurve, Interval, SampleAutoCurve};
 use bevy_math::{ops, Curve, FloatPow, Vec3};
 use bevy_platform::collections::HashSet;
-use bevy_reflect::TypePath;
+use bevy_reflect::{Reflect, TypePath};
 use bevy_transform::components::GlobalTransform;
 use core::f32::{self, consts::PI};
 use smallvec::SmallVec;
@@ -30,9 +31,11 @@ use wgpu_types::TextureFormat;
 /// The scale on [`GlobalTransform`] rescales the planet in world space. Tune it with the radius offset
 /// when your scene uses other units, like kilometer-sized scenes.
 /// The rotation is ignored because the atmosphere is spherically symmetric.
-#[derive(Clone, Component, FromTemplate)]
+#[derive(Clone, Component, FromTemplate, Reflect)]
+#[reflect(Component, Clone, FromTemplate)]
 #[require(GlobalTransform)]
 #[component(on_add = set_default_transform)]
+#[template(reflect)]
 pub struct Atmosphere {
     /// Radius of the planet
     ///

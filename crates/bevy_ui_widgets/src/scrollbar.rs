@@ -8,7 +8,7 @@ use bevy_ecs::{
     hierarchy::{ChildOf, Children},
     observer::On,
     query::{With, Without},
-    reflect::ReflectComponent,
+    reflect::{ReflectComponent, ReflectFromTemplate},
     schedule::IntoScheduleConfigs,
     system::{Query, Res},
     template::FromTemplate,
@@ -67,7 +67,8 @@ pub struct ScrollIntoView {
 /// it wants: it can overlay them on top of the scrolling content, or use a grid layout to displace
 /// the content to make room for the scrollbars.
 #[derive(Component, FromTemplate, Debug, Reflect, Clone, PartialEq)]
-#[reflect(Component)]
+#[reflect(Component, FromTemplate)]
+#[template(reflect)]
 pub struct Scrollbar {
     /// Entity being scrolled.
     pub target: Entity,

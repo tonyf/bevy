@@ -9,10 +9,11 @@ use bevy_ecs::{
     bundle::BundleScratch,
     component::Component,
     entity::Entity,
+    reflect::{ReflectComponent, ReflectFromTemplate},
     template::FromTemplate,
     world::{EntityWorldMut, World},
 };
-use bevy_reflect::{TypePath, TypeRegistry};
+use bevy_reflect::{Reflect, TypePath, TypeRegistry};
 use thiserror::Error;
 
 /// An [`Asset`] that holds a [`Scene`], tracks its dependencies, and holds the [`ResolvedSceneRoot`] (after the [`Scene`] has been loaded and resolved).
@@ -121,7 +122,9 @@ pub enum SpawnSceneError {
 /// re-applied to this entity. See [`SceneInstanceState`] for what that costs.
 ///
 /// [`AssetPlugin::watch_for_changes_override`]: bevy_asset::AssetPlugin::watch_for_changes_override
-#[derive(Component, FromTemplate, Deref, DerefMut)]
+#[derive(Component, FromTemplate, Deref, DerefMut, Reflect)]
+#[reflect(Component, FromTemplate)]
+#[template(reflect)]
 #[require(SceneInstanceState)]
 pub struct ScenePatchInstance(pub Handle<ScenePatch>);
 
