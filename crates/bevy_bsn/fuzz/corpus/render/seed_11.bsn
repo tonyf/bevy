@@ -1,3 +1,0 @@
-:"scenes/base.bsn"
-#Styled
-Color::Srgba(Srgba { red: 0.1, green: 0.2, blue: 0.3, alpha: 1.0 })

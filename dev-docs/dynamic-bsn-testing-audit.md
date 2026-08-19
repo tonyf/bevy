@@ -99,5 +99,11 @@ Eof-defaulting peek) and reserved-word diagnostic-wording differences.
 ## Fuzzing baseline (Layer 3, recorded here for reference)
 
 Initial local runs at introduction: `parse` 1.33M execs/46s, `roundtrip` 1.53M/61s,
-`render` 583K/46s — zero crashes, zero hangs. Nightly scheduled workflow:
-`.github/workflows/bsn-fuzz.yml`.
+`render` 583K/46s — zero crashes, zero hangs.
+
+The cargo-fuzz workspace (`crates/bevy_bsn/fuzz/`) and its nightly workflow
+(`.github/workflows/bsn-fuzz.yml`) were later removed from the branch to keep the
+mergeable surface lean; the numbers above are from those runs. The bounded in-test
+fuzz loops in `bevy_bsn`'s `adversarial.rs` remain and run in ordinary CI. The fuzz
+workspace can be resurrected from git history if persistent coverage-guided fuzzing
+is wanted again.

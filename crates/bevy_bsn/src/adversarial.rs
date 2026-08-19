@@ -7,9 +7,7 @@
 //! The rest of the module is a set of bounded, deterministic property loops — seed mutation,
 //! fragment soup, a grammar-directed document generator, and the shared [`exercise`] invariant
 //! battery (span validity, pre-order ids, print/parse round trip, printer idempotence). They
-//! run on every platform in a couple of seconds; the persistent coverage-guided targets in
-//! `crates/bevy_bsn/fuzz/`, which reuse this module's seed corpus, are the complement that
-//! runs long and shrinks.
+//! run on every platform in a couple of seconds.
 
 use alloc::{
     format,
