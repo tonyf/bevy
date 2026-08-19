@@ -911,8 +911,10 @@ pub(crate) struct RelatedSceneListSpawn {
 /// This watches `Insert`, not `Add`: replacing the component (for example a second
 /// [`queue_apply_scene`](EntityWorldMutSceneExt::queue_apply_scene) on the same entity) must
 /// re-queue the instance, and `Add` does not fire when the component is already present.
+/// Each application fires a fresh bottom-up [`Ready`](crate::Ready) pass over the spawned
+/// hierarchy, so `Ready` observers run again when an instance is replaced or hot reloaded.
 pub fn on_insert_scene_patch_instance(
-    insert: On<Insert, ScenePatchInstance>,
+    insert: On<Insert<ScenePatchInstance>>,
     mut queued_scenes: ResMut<QueuedScenes>,
     instances: Query<&ScenePatchInstance>,
 ) {
@@ -2212,7 +2214,7 @@ mod tests {
 
         // An observer that reacts to the new generation of children by queuing another scene.
         app.world_mut()
-            .add_observer(|add: On<Add, Name>, mut commands: Commands| {
+            .add_observer(|add: On<Add<Name>>, mut commands: Commands| {
                 commands
                     .entity(add.entity)
                     .queue_apply_scene(bsn! { HotMarker });
