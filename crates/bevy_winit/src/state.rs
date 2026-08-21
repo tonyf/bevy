@@ -38,7 +38,7 @@ use bevy_window::{
 use bevy_window::{CursorOptions, PrimaryWindow, RawHandleWrapper};
 
 use crate::{
-    accessibility::ACCESS_KIT_ADAPTERS,
+    accessibility::{shutdown_accessibility, ACCESS_KIT_ADAPTERS},
     converters::{self, convert_touch_phase},
     create_windows,
     system::{create_monitors, CachedWindow, WinitWindowPressedKeys},
@@ -500,6 +500,12 @@ impl ApplicationHandler<WinitUserEvent> for WinitAppRunnerState {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // AccessKit adapters own native platform objects and cloned event-loop
+        // proxies. Retire them while the event loop and windows are still live;
+        // there is no later app update in which an exit lifecycle edge could be
+        // consumed.
+        shutdown_accessibility(self.world_mut());
+
         // Drop windows while event loop is still active, before TLS destruction.
         // Prevents panic on macOS when exiting from exclusive fullscreen.
         WINIT_WINDOWS.with(|ww| ww.borrow_mut().windows.clear());
@@ -570,11 +576,21 @@ impl WinitAppRunnerState {
 
                     WINIT_WINDOWS.with_borrow_mut(|winit_windows| {
                         ACCESS_KIT_ADAPTERS.with_borrow_mut(|adapters| {
+                            let accessibility_state = self
+                                .world()
+                                .get::<bevy_a11y::WindowAccessibilityState>(entity)
+                                .cloned()
+                                .unwrap_or_default();
                             let mut create_window =
                                 SystemState::<CreateWindowParams>::from_world(self.world_mut());
 
-                            let (.., mut handlers, accessibility_requested, monitors) =
-                                create_window.get_mut(self.world_mut()).unwrap();
+                            let (
+                                ..,
+                                mut handlers,
+                                accessibility_requested,
+                                event_loop_proxy,
+                                monitors,
+                            ) = create_window.get_mut(self.world_mut()).unwrap();
 
                             let winit_window = winit_windows.create_window(
                                 event_loop,
@@ -584,12 +600,16 @@ impl WinitAppRunnerState {
                                 adapters,
                                 &mut handlers,
                                 &accessibility_requested,
+                                accessibility_state.clone(),
+                                event_loop_proxy.clone_proxy(),
                                 &monitors,
                             );
 
                             let wrapper = RawHandleWrapper::new(winit_window).unwrap();
 
-                            self.world_mut().entity_mut(entity).insert(wrapper);
+                            self.world_mut()
+                                .entity_mut(entity)
+                                .insert((wrapper, accessibility_state));
                         });
                     });
                 }

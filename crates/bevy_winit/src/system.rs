@@ -54,18 +54,22 @@ pub fn create_windows(
         mut window_created_events,
         mut handlers,
         accessibility_requested,
+        event_loop_proxy,
         monitors,
     ): SystemParamItem<CreateWindowParams>,
 ) {
     WINIT_WINDOWS.with_borrow_mut(|winit_windows| {
         ACCESS_KIT_ADAPTERS.with_borrow_mut(|adapters| {
-            for (entity, mut window, cursor_options, handle_holder) in &mut created_windows {
+            for (entity, mut window, cursor_options, handle_holder, accessibility_state) in
+                &mut created_windows
+            {
                 if winit_windows.get_window(entity).is_some() {
                     continue;
                 }
 
                 info!("Creating new window {} ({})", window.title.as_str(), entity);
 
+                let accessibility_state = accessibility_state.cloned().unwrap_or_default();
                 let winit_window = winit_windows.create_window(
                     event_loop,
                     entity,
@@ -74,6 +78,8 @@ pub fn create_windows(
                     adapters,
                     &mut handlers,
                     &accessibility_requested,
+                    accessibility_state.clone(),
+                    event_loop_proxy.clone_proxy(),
                     &monitors,
                 );
 
@@ -89,6 +95,7 @@ pub fn create_windows(
                     CachedWindow(window.clone()),
                     CachedCursorOptions(cursor_options.clone()),
                     WinitWindowPressedKeys::default(),
+                    accessibility_state,
                 ));
 
                 if let Ok(handle_wrapper) = RawHandleWrapper::new(winit_window) {

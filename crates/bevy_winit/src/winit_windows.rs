@@ -1,4 +1,4 @@
-use bevy_a11y::AccessibilityRequested;
+use bevy_a11y::{AccessibilityRequested, WindowAccessibilityState};
 use bevy_ecs::entity::Entity;
 
 use bevy_ecs::entity::EntityHashMap;
@@ -13,6 +13,7 @@ use winit::{
     dpi::{LogicalSize, PhysicalPosition},
     error::ExternalError,
     event_loop::ActiveEventLoop,
+    event_loop::EventLoopProxy,
     monitor::{MonitorHandle, VideoModeHandle},
     window::{CursorGrabMode as WinitCursorGrabMode, Fullscreen, Window as WinitWindow, WindowId},
 };
@@ -23,6 +24,7 @@ use crate::{
     },
     converters::{convert_enabled_buttons, convert_window_level, convert_window_theme},
     winit_monitors::WinitMonitors,
+    WinitUserEvent,
 };
 
 /// A resource mapping window entities to their `winit`-backend [`Window`](winit::window::Window)
@@ -62,6 +64,8 @@ impl WinitWindows {
         adapters: &mut AccessKitAdapters,
         handlers: &mut WinitActionRequestHandlers,
         accessibility_requested: &AccessibilityRequested,
+        window_accessibility_state: WindowAccessibilityState,
+        event_loop_proxy: EventLoopProxy<WinitUserEvent>,
         monitors: &WinitMonitors,
     ) -> &WindowWrapper<WinitWindow> {
         let mut winit_window_attributes = WinitWindow::default_attributes();
@@ -308,6 +312,8 @@ impl WinitWindows {
             entity,
             name,
             accessibility_requested.clone(),
+            window_accessibility_state,
+            event_loop_proxy,
             adapters,
             handlers,
         );

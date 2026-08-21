@@ -20,7 +20,7 @@ use bevy_window::{ExitSystems, RawHandleWrapperHolder, WindowEvent};
 use core::cell::RefCell;
 use winit::{event_loop::EventLoop, window::WindowId};
 
-use bevy_a11y::AccessibilityRequested;
+use bevy_a11y::{AccessibilityRequested, WindowAccessibilityState};
 use bevy_app::{App, Last, Plugin};
 use bevy_ecs::prelude::*;
 use bevy_window::{CursorOptions, Window, WindowCreated};
@@ -205,6 +205,12 @@ pub struct RawWinitWindowEvent {
 #[derive(Resource, Deref)]
 pub struct EventLoopProxyWrapper(EventLoopProxy<WinitUserEvent>);
 
+impl EventLoopProxyWrapper {
+    pub(crate) fn clone_proxy(&self) -> EventLoopProxy<WinitUserEvent> {
+        self.0.clone()
+    }
+}
+
 /// A wrapper around [`winit::event_loop::OwnedDisplayHandle`]
 ///
 /// The `DisplayHandleWrapper` can be used to build integrations that rely on direct
@@ -235,12 +241,14 @@ pub type CreateWindowParams<'w, 's> = (
             &'static mut Window,
             &'static CursorOptions,
             Option<&'static RawHandleWrapperHolder>,
+            Option<&'static WindowAccessibilityState>,
         ),
         Added<Window>,
     >,
     MessageWriter<'w, WindowCreated>,
     ResMut<'w, WinitActionRequestHandlers>,
     Res<'w, AccessibilityRequested>,
+    Res<'w, EventLoopProxyWrapper>,
     Res<'w, WinitMonitors>,
 );
 
